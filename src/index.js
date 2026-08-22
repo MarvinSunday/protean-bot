@@ -12,10 +12,14 @@ import {
   hasAlreadyClaimed,
   distributeWelcomeGrant,
   createDaoOnChain,
+  ensureGasFunded,
+  stakeTokens,
+  proposeOnChain,
+  castVoteOnChain,
   formatEther,
 } from "./contracts.js";
 import { short, stateLine, formatDate } from "./format.js";
-import { getLinkedWallet, connectLink } from "./wallets.js";
+import { deriveUserWallet, isWalletDerivationConfigured } from "./wallet.js";
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -52,8 +56,7 @@ bot.command("help", (ctx) =>
       "/setdistributor `<address>` — link a welcome-token distributor (admin)",
       "",
       "*Your wallet*",
-      "/connect — link a wallet to your Telegram account (DM)",
-      "/wallet — show your linked wallet address",
+      "/wallet — show your wallet address (generated automatically, no setup needed)",
       "",
       "*DAO info*",
       "/dao — DAO name, token, treasury, config",
@@ -61,12 +64,15 @@ bot.command("help", (ctx) =>
       "/contribute — get the treasury address to send funds to",
       "/balance `[address]` — staked voting power (yours, or an address)",
       "",
-      "*Proposals*",
+      "*Proposals & voting*",
       "/proposals — list proposals",
       "/proposal `<id>` — full detail on one proposal",
+      "/stake `<amount>` — stake tokens to activate voting power",
+      "/propose `<target> <value> <data> <description>` — create a proposal",
+      "/vote `<id> for|against|abstain` — cast a vote",
       "",
       "*Welcome tokens*",
-      "/claim — claim your welcome tokens (after /connect)",
+      "/claim — claim your welcome tokens",
     ].join("\n"),
     { parse_mode: "Markdown" }
   )
@@ -197,43 +203,24 @@ bot.command("setdistributor", async (ctx) => {
 });
 
 /*//////////////////////////////////////////////////////////////
-                        /connect, /wallet
+                              /wallet
 //////////////////////////////////////////////////////////////*/
 
-bot.command("connect", async (ctx) => {
-  const link = connectLink();
-  if (!link) {
-    await ctx.reply("Wallet linking isn't set up yet - ask an admin to configure CONNECT_SITE_URL.");
+bot.command("wallet", async (ctx) => {
+  if (!isWalletDerivationConfigured()) {
+    await ctx.reply("Wallets aren't set up yet - ask an admin to configure MASTER_WALLET_SEED.");
     return;
   }
 
   try {
-    // DM rather than reply in-group, since this is personal.
-    await ctx.api.sendMessage(
-      ctx.from.id,
-      `Connect your wallet here:\n${link}\n\nThis is a one-time step — after this, voting and proposing work directly from chat.`
-    );
-    if (ctx.chat.type !== "private") {
-      await ctx.reply("📬 Sent you a DM with your connect link.");
-    }
-  } catch (err) {
+    const account = deriveUserWallet(ctx.from.id);
     await ctx.reply(
-      "Couldn't DM you — please start a private chat with me first (search for this bot and press Start), then try /connect again."
+      `Your wallet: \`${short(account.address)}\`\n\nThis wallet is generated automatically from your Telegram account — no separate connect step needed.`,
+      { parse_mode: "Markdown" }
     );
-  }
-});
-
-bot.command("wallet", async (ctx) => {
-  try {
-    const linked = await getLinkedWallet(ctx.from.id);
-    if (!linked) {
-      await ctx.reply("No wallet linked yet. Run /connect to link one.");
-      return;
-    }
-    await ctx.reply(`Your wallet: \`${short(linked.walletAddress)}\``, { parse_mode: "Markdown" });
   } catch (err) {
     console.error(err);
-    await ctx.reply("Couldn't check your linked wallet right now.");
+    await ctx.reply("Couldn't generate your wallet right now.");
   }
 });
 
@@ -344,15 +331,14 @@ bot.command("balance", async (ctx) => {
   }
 
   if (!target) {
-    const linked = await getLinkedWallet(ctx.from.id).catch(() => null);
-    if (!linked) {
+    if (!isWalletDerivationConfigured()) {
       await ctx.reply(
-        "No wallet linked yet, and no address given.\nRun /connect to link one, or use `/balance 0xSomeAddress`.",
+        "No address given, and wallets aren't set up.\nUse `/balance 0xSomeAddress`.",
         { parse_mode: "Markdown" }
       );
       return;
     }
-    target = linked.walletAddress;
+    target = deriveUserWallet(ctx.from.id).address;
   }
 
   try {
@@ -446,6 +432,151 @@ bot.command("proposal", async (ctx) => {
 });
 
 /*//////////////////////////////////////////////////////////////
+                              /stake
+//////////////////////////////////////////////////////////////*/
+
+bot.command("stake", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletDerivationConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+    return;
+  }
+
+  const amountStr = ctx.match?.trim();
+  const amount = Number(amountStr);
+  if (!amountStr || !Number.isFinite(amount) || amount <= 0) {
+    await ctx.reply("Usage: `/stake 100` — stakes 100 of your tokens to activate voting power.", {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+
+  const account = deriveUserWallet(ctx.from.id);
+  const statusMsg = await ctx.reply("⏳ Staking — this takes a moment…");
+
+  try {
+    await ensureGasFunded(account);
+    const { tokenAddress } = await getDaoInfo(address);
+    await stakeTokens(account, tokenAddress, amount);
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Staked ${amount} tokens. Your voting power is now active.`
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Couldn't stake: ${err.shortMessage || err.message}`
+    );
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                              /propose
+//////////////////////////////////////////////////////////////*/
+
+bot.command("propose", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletDerivationConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+    return;
+  }
+
+  // Format: /propose <target> <value> <data> <description...>
+  const raw = ctx.match?.trim() ?? "";
+  const parts = raw.split(/\s+/);
+  const [target, value, data, ...descriptionParts] = parts;
+  const description = descriptionParts.join(" ");
+
+  if (!target || !isAddress(target) || !value || !data || !description) {
+    await ctx.reply(
+      [
+        "Usage: `/propose <target> <value> <data> <description>`",
+        "",
+        "Example (no-op proposal for testing):",
+        "`/propose 0xRecipient 0 0x Send a test proposal`",
+        "",
+        "⚠️ `data` must be `0x` or a full hex-encoded calldata string — this is a low-level, advanced-users command for now.",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = deriveUserWallet(ctx.from.id);
+  const statusMsg = await ctx.reply("⏳ Submitting proposal…");
+
+  try {
+    await ensureGasFunded(account);
+    const { proposalId } = await proposeOnChain(account, address, target, value, data, description);
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Proposal #${proposalId} created.\n\nUse /proposal ${proposalId} to check on it, or /vote ${proposalId} for|against|abstain once voting opens.`
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Couldn't create the proposal: ${err.shortMessage || err.message}`
+    );
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                              /vote
+//////////////////////////////////////////////////////////////*/
+
+const VOTE_CHOICES = { for: 1, against: 0, abstain: 2 };
+
+bot.command("vote", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletDerivationConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+    return;
+  }
+
+  const args = ctx.match?.trim().split(/\s+/) ?? [];
+  const [id, choiceRaw] = args;
+  const choice = choiceRaw?.toLowerCase();
+
+  if (!id || !/^\d+$/.test(id) || !(choice in VOTE_CHOICES)) {
+    await ctx.reply("Usage: `/vote <id> for|against|abstain`", { parse_mode: "Markdown" });
+    return;
+  }
+
+  const account = deriveUserWallet(ctx.from.id);
+  const statusMsg = await ctx.reply("⏳ Casting vote…");
+
+  try {
+    await ensureGasFunded(account);
+    await castVoteOnChain(account, address, id, VOTE_CHOICES[choice]);
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Voted *${choice}* on proposal #${id}.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Couldn't vote: ${err.shortMessage || err.message}`
+    );
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
                             ERROR HANDLING
 //////////////////////////////////////////////////////////////*/
 
@@ -473,15 +604,16 @@ async function attemptClaim(chatId, telegramUserId) {
   const distributorAddress = getChatDistributor(chatId);
   if (!distributorAddress) return { status: "no-distributor" };
 
-  const linked = await getLinkedWallet(telegramUserId).catch(() => null);
-  if (!linked) return { status: "no-wallet" };
+  if (!isWalletDerivationConfigured()) return { status: "no-wallet" };
 
-  const alreadyClaimed = await hasAlreadyClaimed(distributorAddress, linked.walletAddress).catch(() => false);
+  const account = deriveUserWallet(telegramUserId);
+
+  const alreadyClaimed = await hasAlreadyClaimed(distributorAddress, account.address).catch(() => false);
   if (alreadyClaimed) return { status: "already-claimed" };
 
   try {
-    const hash = await distributeWelcomeGrant(distributorAddress, linked.walletAddress);
-    return { status: "sent", hash, walletAddress: linked.walletAddress };
+    const hash = await distributeWelcomeGrant(distributorAddress, account.address);
+    return { status: "sent", hash, walletAddress: account.address };
   } catch (err) {
     console.error("distributeWelcomeGrant failed:", err);
     return { status: "error", error: err.message };
@@ -499,20 +631,11 @@ bot.on("message:new_chat_members", async (ctx) => {
 
     if (result.status === "sent") {
       await ctx.reply(`🎉 Welcome, ${member.first_name}! Sent your welcome tokens.`);
-    } else if (result.status === "no-wallet") {
-      try {
-        await ctx.api.sendMessage(
-          member.id,
-          "👋 Welcome! Run /connect to link a wallet, then /claim to grab your welcome tokens."
-        );
-      } catch {
-        // Can't DM them yet (they haven't started a chat with the bot) -
-        // that's fine, /claim after /connect covers this case too.
-      }
     }
-    // "already-claimed" and "error" cases are silent here - a join event
-    // isn't the place to surface an error to the whole group; /claim
-    // gives the user a way to see what actually happened.
+    // "no-wallet" (MASTER_WALLET_SEED not configured), "already-claimed",
+    // and "error" cases are silent here - a join event isn't the place to
+    // surface a bot-wide misconfiguration to the whole group; /claim gives
+    // the user a way to see what actually happened.
   }
 });
 
@@ -524,7 +647,7 @@ bot.command("claim", async (ctx) => {
       await ctx.reply("No welcome distribution is set up for this group.");
       break;
     case "no-wallet":
-      await ctx.reply("Run /connect first to link a wallet, then /claim again.");
+      await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
       break;
     case "already-claimed":
       await ctx.reply("You've already claimed your welcome tokens.");

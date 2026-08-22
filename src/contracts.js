@@ -1,8 +1,8 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { formatEther, parseEther, getAddress } from "viem";
-import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESS } from "./config.js";
+import { createWalletClient, http, formatEther, parseEther, getAddress } from "viem";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESS, monadTestnet } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -207,6 +207,117 @@ export async function createDaoOnChain(name, symbol, initialSupplyWhole, maxSupp
   });
 
   return { hash, governance, governanceToken, underlyingToken, treasury };
+}
+
+/*//////////////////////////////////////////////////////////////
+            PER-USER WALLET ACTIONS (derived wallets)
+//////////////////////////////////////////////////////////////*/
+
+function walletClientFor(account) {
+  return createWalletClient({ account, chain: monadTestnet, transport: http() });
+}
+
+const MIN_GAS_BALANCE = parseEther("0.005");
+const GAS_TOPUP_AMOUNT = parseEther("0.01");
+
+/**
+ * Tops up `account` with a small amount of MON from the operator wallet if
+ * its balance is below a threshold. Derived wallets start with zero MON
+ * and can't pay gas for their own first transaction without this - the
+ * operator wallet effectively sponsors a small amount of gas per user.
+ * Silently does nothing if the account already has enough, or if no
+ * operator wallet is configured (caller's own transaction will then just
+ * fail with an insufficient-funds error, which is an honest failure mode).
+ */
+export async function ensureGasFunded(account) {
+  if (!walletClient || !operatorAccount) return;
+
+  const balance = await publicClient.getBalance({ address: account.address });
+  if (balance >= MIN_GAS_BALANCE) return;
+
+  const hash = await walletClient.sendTransaction({
+    to: account.address,
+    value: GAS_TOPUP_AMOUNT,
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+}
+
+/**
+ * Approves and stakes `amountWhole` of the underlying token into the
+ * staking wrapper, signed by `account` (the user's own derived wallet).
+ * Two on-chain transactions: approve, then stake.
+ */
+export async function stakeTokens(account, stakingTokenAddress, amountWhole) {
+  const client = walletClientFor(account);
+  const amount = parseEther(String(amountWhole));
+
+  const underlyingAddress = await publicClient.readContract({
+    address: getAddress(stakingTokenAddress),
+    abi: abis.StakedGovernanceToken,
+    functionName: "underlying",
+  });
+
+  const approveHash = await client.writeContract({
+    address: underlyingAddress,
+    abi: abis.GovernanceToken,
+    functionName: "approve",
+    args: [getAddress(stakingTokenAddress), amount],
+  });
+  await publicClient.waitForTransactionReceipt({ hash: approveHash });
+
+  const stakeHash = await client.writeContract({
+    address: getAddress(stakingTokenAddress),
+    abi: abis.StakedGovernanceToken,
+    functionName: "stake",
+    args: [amount],
+  });
+  await publicClient.waitForTransactionReceipt({ hash: stakeHash });
+
+  return { approveHash, stakeHash };
+}
+
+/**
+ * Creates a single-action proposal, signed by `account`.
+ */
+export async function proposeOnChain(account, governanceAddress, target, value, data, metadataURI) {
+  const client = walletClientFor(account);
+
+  const actions = [{ target: getAddress(target), value: parseEther(String(value || "0")), data: data || "0x" }];
+
+  const hash = await client.writeContract({
+    address: getAddress(governanceAddress),
+    abi: abis.Governance,
+    functionName: "propose",
+    args: [actions, metadataURI],
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+
+  // Proposal count right after this tx reflects the new proposal's ID,
+  // since IDs are sequential and this account just created the latest one.
+  const proposalId = await publicClient.readContract({
+    address: getAddress(governanceAddress),
+    abi: abis.Governance,
+    functionName: "proposalCount",
+  });
+
+  return { hash, receipt, proposalId };
+}
+
+/**
+ * Casts a vote, signed by `account`. `support` is 0=Against, 1=For, 2=Abstain.
+ */
+export async function castVoteOnChain(account, governanceAddress, proposalId, support) {
+  const client = walletClientFor(account);
+
+  const hash = await client.writeContract({
+    address: getAddress(governanceAddress),
+    abi: abis.Governance,
+    functionName: "castVote",
+    args: [BigInt(proposalId), support],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  return { hash };
 }
 
 export { formatEther };

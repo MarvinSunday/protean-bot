@@ -55,8 +55,8 @@ if (!operatorAccount) {
 
 export const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 
-// Needed for /createdao. Bot works fine without it - that command just
-// won't be available.
+// Needed for /createdao and for gas-funding derived user wallets. Bot works
+// fine without it - those features just won't be available.
 export const FACTORY_ADDRESS = process.env.FACTORY_ADDRESS;
 if (!FACTORY_ADDRESS) {
   console.warn("FACTORY_ADDRESS not set - /createdao will not work until it is.");
