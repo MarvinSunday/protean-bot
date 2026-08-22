@@ -24,7 +24,7 @@ function writeDb(data) {
 /** Link a Telegram chat to a deployed Governance contract address. */
 export function registerChat(chatId, governanceAddress) {
   const db = readDb();
-  db[chatId] = { governanceAddress, registeredAt: Date.now() };
+  db[chatId] = { ...db[chatId], governanceAddress, registeredAt: Date.now() };
   writeDb(db);
 }
 
@@ -32,6 +32,19 @@ export function registerChat(chatId, governanceAddress) {
 export function getChatDAO(chatId) {
   const db = readDb();
   return db[chatId]?.governanceAddress ?? null;
+}
+
+/** Link a chat's WelcomeDistributor address (optional, separate from Governance). */
+export function registerDistributor(chatId, distributorAddress) {
+  const db = readDb();
+  db[chatId] = { ...db[chatId], distributorAddress };
+  writeDb(db);
+}
+
+/** Get the WelcomeDistributor address linked to a chat, or null if unset. */
+export function getChatDistributor(chatId) {
+  const db = readDb();
+  return db[chatId]?.distributorAddress ?? null;
 }
 
 export function unregisterChat(chatId) {

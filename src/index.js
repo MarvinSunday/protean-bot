@@ -1,13 +1,17 @@
 import { Bot } from "grammy";
 import { isAddress } from "viem";
 import { BOT_TOKEN, monadTestnet } from "./config.js";
-import { registerChat, getChatDAO, unregisterChat } from "./db.js";
+import { registerChat, getChatDAO, unregisterChat, registerDistributor, getChatDistributor } from "./db.js";
 import {
   getDaoInfo,
   getProposalCount,
   getProposal,
   getTreasuryBalance,
   getVotingPower,
+  getDistributorInfo,
+  hasAlreadyClaimed,
+  distributeWelcomeGrant,
+  createDaoOnChain,
   formatEther,
 } from "./contracts.js";
 import { short, stateLine, formatDate } from "./format.js";
@@ -42,8 +46,10 @@ bot.command("help", (ctx) =>
   ctx.reply(
     [
       "*Setup*",
-      "/register `<governance_address>` — link this group to a DAO (admin)",
+      "/createdao `<name> <symbol> <initialSupply> <maxSupply>` — deploy a new DAO and link it here",
+      "/register `<governance_address>` — link this group to an existing DAO (admin)",
       "/unregister — unlink this group (admin)",
+      "/setdistributor `<address>` — link a welcome-token distributor (admin)",
       "",
       "*Your wallet*",
       "/connect — link a wallet to your Telegram account (DM)",
@@ -58,10 +64,79 @@ bot.command("help", (ctx) =>
       "*Proposals*",
       "/proposals — list proposals",
       "/proposal `<id>` — full detail on one proposal",
+      "",
+      "*Welcome tokens*",
+      "/claim — claim your welcome tokens (after /connect)",
     ].join("\n"),
     { parse_mode: "Markdown" }
   )
 );
+
+/*//////////////////////////////////////////////////////////////
+                            /createdao
+//////////////////////////////////////////////////////////////*/
+
+bot.command("createdao", async (ctx) => {
+  const args = ctx.match?.trim().split(/\s+/) ?? [];
+
+  if (args.length !== 4) {
+    await ctx.reply(
+      [
+        "Usage: `/createdao <name> <symbol> <initialSupply> <maxSupply>`",
+        "",
+        "Example: `/createdao ArkDAO ARK 1000000 10000000`",
+        "",
+        "⚠️ Name and symbol must be single words (no spaces) for now.",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const [name, symbol, initialSupplyStr, maxSupplyStr] = args;
+  const initialSupply = Number(initialSupplyStr);
+  const maxSupply = Number(maxSupplyStr);
+
+  if (!Number.isFinite(initialSupply) || !Number.isFinite(maxSupply) || initialSupply <= 0 || maxSupply <= 0) {
+    await ctx.reply("Initial supply and max supply must be positive numbers.");
+    return;
+  }
+  if (initialSupply > maxSupply) {
+    await ctx.reply("Initial supply can't exceed max supply.");
+    return;
+  }
+
+  const statusMsg = await ctx.reply("⏳ Creating DAO on-chain — this takes a moment…");
+
+  try {
+    const result = await createDaoOnChain(name, symbol, initialSupply, maxSupply);
+
+    // Auto-link this chat to the new DAO, saving a manual /register step.
+    registerChat(ctx.chat.id, result.governance);
+
+    const lines = [
+      `✅ *${name}* created and linked to this group.`,
+      "",
+      `Governance: \`${short(result.governance)}\``,
+      `Token (staking wrapper): \`${short(result.governanceToken)}\``,
+      `Underlying token: \`${short(result.underlyingToken)}\``,
+      `Treasury: \`${short(result.treasury)}\``,
+      "",
+      `⚠️ The entire initial supply (${initialSupply} ${symbol}) is currently held by the bot's operator wallet, not any individual — this is a temporary shortcut until DAO creation moves to protean-connect. Someone will need to receive and distribute it manually for now.`,
+    ];
+
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, lines.join("\n"), {
+      parse_mode: "Markdown",
+    });
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Couldn't create the DAO: ${err.message}`
+    );
+  }
+});
 
 /*//////////////////////////////////////////////////////////////
                             /register
@@ -95,6 +170,30 @@ bot.command("register", async (ctx) => {
 bot.command("unregister", async (ctx) => {
   unregisterChat(ctx.chat.id);
   await ctx.reply("Unlinked. Run /register to link a DAO again.");
+});
+
+bot.command("setdistributor", async (ctx) => {
+  const address = ctx.match?.trim();
+
+  if (!address || !isAddress(address)) {
+    await ctx.reply("Usage: `/setdistributor 0xYourWelcomeDistributorAddress`", {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+
+  let info;
+  try {
+    info = await getDistributorInfo(address);
+  } catch (err) {
+    await ctx.reply("Couldn't read a WelcomeDistributor at that address. Double-check it's deployed correctly.");
+    return;
+  }
+
+  registerDistributor(ctx.chat.id, address);
+  await ctx.reply(
+    `✅ Welcome distributor linked. New members will be offered ${info.amountPerClaim} tokens once they've connected a wallet.`
+  );
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -355,6 +454,91 @@ bot.catch((err) => {
 });
 
 bot.start();
+
+/*//////////////////////////////////////////////////////////////
+                    WELCOME DISTRIBUTION
+//////////////////////////////////////////////////////////////*/
+
+/**
+ * Attempts to distribute the welcome grant to a Telegram user in a given
+ * chat. Returns a short status string describing what happened (used by
+ * both the automatic join handler and the manual /claim fallback).
+ *
+ * NOTE ON TRUST: this only checks "has this address already claimed" and
+ * "is a wallet linked" - it does not independently verify Telegram
+ * membership beyond what grammY's own event told us. See
+ * WelcomeDistributor.sol's natspec for the full trust-model note.
+ */
+async function attemptClaim(chatId, telegramUserId) {
+  const distributorAddress = getChatDistributor(chatId);
+  if (!distributorAddress) return { status: "no-distributor" };
+
+  const linked = await getLinkedWallet(telegramUserId).catch(() => null);
+  if (!linked) return { status: "no-wallet" };
+
+  const alreadyClaimed = await hasAlreadyClaimed(distributorAddress, linked.walletAddress).catch(() => false);
+  if (alreadyClaimed) return { status: "already-claimed" };
+
+  try {
+    const hash = await distributeWelcomeGrant(distributorAddress, linked.walletAddress);
+    return { status: "sent", hash, walletAddress: linked.walletAddress };
+  } catch (err) {
+    console.error("distributeWelcomeGrant failed:", err);
+    return { status: "error", error: err.message };
+  }
+}
+
+bot.on("message:new_chat_members", async (ctx) => {
+  const distributorAddress = getChatDistributor(ctx.chat.id);
+  if (!distributorAddress) return; // no distributor configured, nothing to do
+
+  for (const member of ctx.message.new_chat_members) {
+    if (member.is_bot) continue;
+
+    const result = await attemptClaim(ctx.chat.id, member.id);
+
+    if (result.status === "sent") {
+      await ctx.reply(`🎉 Welcome, ${member.first_name}! Sent your welcome tokens.`);
+    } else if (result.status === "no-wallet") {
+      try {
+        await ctx.api.sendMessage(
+          member.id,
+          "👋 Welcome! Run /connect to link a wallet, then /claim to grab your welcome tokens."
+        );
+      } catch {
+        // Can't DM them yet (they haven't started a chat with the bot) -
+        // that's fine, /claim after /connect covers this case too.
+      }
+    }
+    // "already-claimed" and "error" cases are silent here - a join event
+    // isn't the place to surface an error to the whole group; /claim
+    // gives the user a way to see what actually happened.
+  }
+});
+
+bot.command("claim", async (ctx) => {
+  const result = await attemptClaim(ctx.chat.id, ctx.from.id);
+
+  switch (result.status) {
+    case "no-distributor":
+      await ctx.reply("No welcome distribution is set up for this group.");
+      break;
+    case "no-wallet":
+      await ctx.reply("Run /connect first to link a wallet, then /claim again.");
+      break;
+    case "already-claimed":
+      await ctx.reply("You've already claimed your welcome tokens.");
+      break;
+    case "sent":
+      await ctx.reply(`✅ Sent your welcome tokens to \`${short(result.walletAddress)}\`.`, {
+        parse_mode: "Markdown",
+      });
+      break;
+    case "error":
+      await ctx.reply("Something went wrong sending your tokens — try again in a moment.");
+      break;
+  }
+});
 
 process.on("SIGINT", () => {
   bot.stop();
