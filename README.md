@@ -154,7 +154,9 @@ Test these yourself before trusting them for anything real — see the
   the bot request signatures without a wallet popup per action, which is
   separate, additional work on top of just fixing address resolution. The
   `protean-connect` project has the address-resolution debugging in
-  progress and is not currently wired into the bot.
+  progress and is not currently wired into the bot. See
+  [`protean-connect/README.md`](https://github.com/MarvinSunday/protean-connect/blob/main/README.md) for the full current status and the exact
+  next step needed to unblock it.
 
 ## Architecture
 
