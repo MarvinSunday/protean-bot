@@ -215,7 +215,7 @@ bot.command("wallet", async (ctx) => {
   try {
     const account = deriveUserWallet(ctx.from.id);
     await ctx.reply(
-      `Your wallet: \`${short(account.address)}\`\n\nThis wallet is generated automatically from your Telegram account — no separate connect step needed.`,
+      `Your wallet:\n\`${account.address}\`\n\nTap the address above to copy it. This wallet is generated automatically from your Telegram account — no separate connect step needed.`,
       { parse_mode: "Markdown" }
     );
   } catch (err) {
