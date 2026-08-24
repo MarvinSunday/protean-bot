@@ -38,7 +38,7 @@ decentralization for zero-friction onboarding. See
 
 ### DAO info (read-only)
 - `/dao` — name, token, treasury, governance config
-- `/treasury` — current treasury MON balance
+- `/treasury` — current treasury Chain Native Token balance
 - `/contribute` — DMs the treasury address so anyone can send funds directly
 - `/balance [address]` — staked voting power for yourself or a given address
 
@@ -66,9 +66,9 @@ Fill in `.env`:
 | Variable | Required for | Notes |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | everything | from BotFather |
-| `RPC_URL` | everything | defaults to Monad Testnet's public RPC |
+| `RPC_URL` | everything | defaults to Chain's public RPC |
 | `FACTORY_ADDRESS` | `/createdao` | from `DeployDAOFactory.s.sol`'s output |
-| `OPERATOR_PRIVATE_KEY` | `/claim`, auto-distribution, `/createdao`, gas-funding user wallets | fund this wallet with MON |
+| `OPERATOR_PRIVATE_KEY` | `/claim`, auto-distribution, `/createdao`, gas-funding user wallets | fund this wallet with Native Token |
 | `MASTER_WALLET_SEED` | wallets, `/stake`, `/propose`, `/vote` | **the most sensitive value in this project** — see Security |
 
 ```bash
@@ -145,7 +145,7 @@ Test these yourself before trusting them for anything real — see the
 
 ## Architecture
 
-- `src/config.js` — Monad Testnet chain definition, viem clients, operator wallet
+- `src/config.js` — The Specific chain definition, viem clients, operator wallet
 - `src/wallet.js` — deterministic per-user wallet derivation
 - `src/contracts.js` — all on-chain reads and writes (Governance, Treasury, tokens, distributor)
 - `src/db.js` — chat↔DAO and chat↔distributor link storage (flat JSON file — fine for now, not concurrency-safe, swap for a real DB before scaling)
