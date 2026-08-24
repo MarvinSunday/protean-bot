@@ -142,6 +142,19 @@ Test these yourself before trusting them for anything real — see the
   needs its own funding pool and spending limits, separate from the
   general operator wallet, so one member's usage can't drain funds meant
   for governance actions.
+- **Migrate off custodial derived wallets to Privy (non-custodial)** —
+  the current wallet model (`src/wallet.js`) is custodial by design: the
+  bot can regenerate any user's key from `MASTER_WALLET_SEED`. An earlier
+  attempt to use Privy's embedded wallets (genuinely non-custodial,
+  Telegram OAuth-based) hit two separate unresolved problems, not one:
+  (1) the connect site couldn't reliably read back the created wallet's
+  address from Privy's SDK response, and (2) transaction *signing* through
+  Privy was never actually built — that needs the session-key/permissions
+  layer (ERC-7715) discussed early in this project, a scoped grant letting
+  the bot request signatures without a wallet popup per action, which is
+  separate, additional work on top of just fixing address resolution. The
+  `protean-connect` project has the address-resolution debugging in
+  progress and is not currently wired into the bot.
 
 ## Architecture
 
