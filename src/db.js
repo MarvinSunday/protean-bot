@@ -21,10 +21,17 @@ function writeDb(data) {
   fs.writeFileSync(DB_PATH, JSON.stringify(data, null, 2));
 }
 
-/** Link a Telegram chat to a deployed Governance contract address. */
-export function registerChat(chatId, governanceAddress) {
+/**
+ * Link a Telegram chat to a deployed governance contract, and record
+ * which governance model it uses - the shared adapter registry in
+ * src/governance/index.js needs this to know which contract shape it's
+ * actually talking to. Defaults to "tokenWeighted" for any chat that
+ * doesn't specify one, matching the model every chat used before this
+ * field existed.
+ */
+export function registerChat(chatId, governanceAddress, model = "tokenWeighted") {
   const db = readDb();
-  db[chatId] = { ...db[chatId], governanceAddress, registeredAt: Date.now() };
+  db[chatId] = { ...db[chatId], governanceAddress, model, registeredAt: Date.now() };
   writeDb(db);
 }
 
@@ -32,6 +39,17 @@ export function registerChat(chatId, governanceAddress) {
 export function getChatDAO(chatId) {
   const db = readDb();
   return db[chatId]?.governanceAddress ?? null;
+}
+
+/**
+ * Get the governance model linked to a chat. Defaults to "tokenWeighted"
+ * if a chat was registered before this field existed (or somehow has no
+ * value set) - this was the only model the bot supported until now, so
+ * that's the only correct default for pre-existing registrations.
+ */
+export function getChatModel(chatId) {
+  const db = readDb();
+  return db[chatId]?.model ?? "tokenWeighted";
 }
 
 /** Link a chat's WelcomeDistributor address (optional, separate from Governance). */

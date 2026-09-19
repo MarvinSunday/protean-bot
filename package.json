@@ -8,6 +8,9 @@
     "dev": "node --watch src/index.js"
   },
   "dependencies": {
+    "@aws-sdk/client-kms": "^3.1131.0",
+    "@supabase/supabase-js": "^2.116.0",
+    "@zama-fhe/relayer-sdk": "^0.4.4",
     "dotenv": "^16.4.5",
     "grammy": "^1.45.1",
     "viem": "^2.21.0"

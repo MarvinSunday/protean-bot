@@ -1,0 +1,172 @@
+import fs from "fs";
+import path from "path";
+import { fileURLToPath } from "url";
+import { getAddress, parseEther } from "viem";
+import { publicClient } from "../config.js";
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+function loadAbi(name) {
+  const raw = fs.readFileSync(path.join(__dirname, "..", "abis", `${name}.json`), "utf8");
+  return JSON.parse(raw);
+}
+
+const abi = loadAbi("BoardGovernance");
+
+function contractFor(address) {
+  return { address: getAddress(address), abi };
+}
+
+/**
+ * Adapter for BoardGovernance - the one model with no token, no For/
+ * Against/Abstain voting, and no separate queue step at all. Genuinely
+ * different from every other adapter, not just differently-named:
+ *
+ * - No governanceToken() on this contract at all. Board has no token
+ *   concept whatsoever - do not call common.js's getGovernanceTokenAddress
+ *   or getDaoInfo with model="board", both will fail since they assume
+ *   every model has a token.
+ *
+ * - vote() and queue() are part of the shared interface for consistent
+ *   registry dispatch, but BOTH throw a clear, explicit error here
+ *   rather than silently mapping onto something incorrect. There is no
+ *   For/Against/Abstain concept - signers either confirm() a proposal or
+ *   they don't, a binary action with no equivalent to "vote against" or
+ *   "abstain." And there is no separate queue step - confirming a
+ *   proposal automatically queues it the moment the required threshold
+ *   is reached (and revoking a confirmation automatically un-queues it
+ *   if that drops it back below threshold - a real, genuine behavior no
+ *   other model has: a Board proposal can move backward in its own
+ *   lifecycle).
+ *
+ * - getProposal() has no forVotes/against/abstain fields at all -
+ *   confirmations is a plain count against requiredApprovals, not a
+ *   token-weighted or headcount vote total. voteWeightUnit is
+ *   "signerConfirmationCount", a fourth distinct category alongside
+ *   "token", "sqrtWeight", and Delegate's "councilVoteCount."
+ */
+
+export async function propose(client, governanceAddress, actions, metadataURI) {
+  const gov = contractFor(governanceAddress);
+
+  const hash = await client.writeContract({
+    ...gov,
+    functionName: "proposeTransaction",
+    args: [actions, metadataURI],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const proposalId = await publicClient.readContract({ ...gov, functionName: "proposalCount" });
+
+  return { hash, proposalId };
+}
+
+export async function vote() {
+  throw new Error(
+    "BoardGovernance has no voting - signers use confirm() or revokeConfirmation() instead. " +
+      "See this adapter's confirm()/revokeConfirmation() exports."
+  );
+}
+
+export async function queue() {
+  throw new Error(
+    "BoardGovernance proposals queue automatically the moment enough signers confirm - " +
+      "there is no separate queue step to call."
+  );
+}
+
+export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
+  const gov = contractFor(governanceAddress);
+
+  const hash = await client.writeContract({
+    ...gov,
+    functionName: "executeTransaction",
+    args: [BigInt(proposalId)],
+    value: parseEther(String(valueWhole)),
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { hash };
+}
+
+export async function cancel(client, governanceAddress, proposalId) {
+  const gov = contractFor(governanceAddress);
+
+  const hash = await client.writeContract({
+    ...gov,
+    functionName: "cancelProposal",
+    args: [BigInt(proposalId)],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { hash };
+}
+
+// Only 5 states here, not 8 - and Active is index 0, not Pending/
+// ChallengeWindow. Confirmed directly from source, own array kept
+// rather than reusing the shared one, same reasoning as optimistic.js.
+const BOARD_STATE_LABELS = ["Active", "Queued", "Executed", "Cancelled", "Expired"];
+
+/**
+ * Read-only. No forVotes/against/abstain - confirmations is a plain
+ * count, requiredApprovals comes from config() separately (this
+ * function does not fetch config itself - callers needing it should
+ * read config() directly via getDaoInfo-equivalent logic, kept separate
+ * so this stays a single, cheap call).
+ */
+export async function getProposal(governanceAddress, proposalId) {
+  const gov = contractFor(governanceAddress);
+
+  const [proposal, stateIndex, executableAfter] = await Promise.all([
+    publicClient.readContract({ ...gov, functionName: "getProposal", args: [BigInt(proposalId)] }),
+    publicClient.readContract({ ...gov, functionName: "state", args: [BigInt(proposalId)] }),
+    publicClient.readContract({ ...gov, functionName: "executableAfter", args: [BigInt(proposalId)] }),
+  ]);
+
+  return {
+    ...proposal,
+    stateIndex: Number(stateIndex),
+    stateLabel: BOARD_STATE_LABELS[Number(stateIndex)] ?? "Unknown",
+    executableAfter,
+    voteWeightUnit: "signerConfirmationCount",
+  };
+}
+
+/*//////////////////////////////////////////////////////////////
+    MODEL-SPECIFIC EXTRAS - no equivalent in any other model
+//////////////////////////////////////////////////////////////*/
+
+/** Confirms a proposal - only callable by a current signer. */
+export async function confirm(client, governanceAddress, proposalId) {
+  const gov = contractFor(governanceAddress);
+  const hash = await client.writeContract({ ...gov, functionName: "confirmTransaction", args: [BigInt(proposalId)] });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { hash };
+}
+
+/**
+ * Revokes the caller's own confirmation. If this drops the proposal
+ * below requiredApprovals after it was already queued, the contract
+ * itself un-queues it automatically - nothing extra to call here for
+ * that part.
+ */
+export async function revokeConfirmation(client, governanceAddress, proposalId) {
+  const gov = contractFor(governanceAddress);
+  const hash = await client.writeContract({
+    ...gov,
+    functionName: "revokeConfirmation",
+    args: [BigInt(proposalId)],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { hash };
+}
+
+/** Read-only: the current signer roster. */
+export async function getSigners(governanceAddress) {
+  const gov = contractFor(governanceAddress);
+  return publicClient.readContract({ ...gov, functionName: "getSigners", args: [] });
+}
+
+/** Read-only: full config (requiredApprovals, timelockDelay, executionPeriod). */
+export async function getConfig(governanceAddress) {
+  const gov = contractFor(governanceAddress);
+  return publicClient.readContract({ ...gov, functionName: "config", args: [] });
+}

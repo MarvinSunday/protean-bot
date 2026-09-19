@@ -1,0 +1,1383 @@
+[
+  {
+    "inputs": [
+      {
+        "internalType": "string",
+        "name": "daoName_",
+        "type": "string"
+      },
+      {
+        "internalType": "address",
+        "name": "creator_",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "governanceToken_",
+        "type": "address"
+      },
+      {
+        "internalType": "address",
+        "name": "treasury_",
+        "type": "address"
+      },
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "proposalBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "approvalVotingDelay",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "approvalVotingPeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "approvalQuorumBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "approvalThresholdBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint32",
+            "name": "positionsWindow",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "executionTimelockDelay",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "resolutionBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "challengePeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "challengeBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "adjudicationVotingPeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "adjudicationQuorumBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "adjudicationThresholdBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint32",
+            "name": "maxOracleStaleness",
+            "type": "uint32"
+          }
+        ],
+        "internalType": "struct SowellianGovernance.SowellianConfig",
+        "name": "config_",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "constructor"
+  },
+  {
+    "inputs": [],
+    "name": "AdjudicationNotEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "AlreadyChallenged",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "AlreadyClaimed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "AlreadyResolved",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "AlreadyVoted",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ApprovalNotMet",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ChallengeWindowClosed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ChallengeWindowStillOpen",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "EmptyMetadataURI",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "EmptyProposalActions",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ExecutionFailed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidConfiguration",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidProposalAction",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidResolutionCriteria",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "InvalidValue",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "MeasurementPeriodNotEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotChallenged",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotFinalized",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotHumanTrack",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NotOracleTrack",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "NothingToClaim",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "PositionsWindowClosed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "PositionsWindowStillOpen",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ProposalNotFound",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "QuorumNotReached",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "Reentrant",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "StaleOracleData",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "TransferFailed",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "Unauthorized",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "VotingNotEnded",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "VotingNotStarted",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "WrongPhase",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAddress",
+    "type": "error"
+  },
+  {
+    "inputs": [],
+    "name": "ZeroAmount",
+    "type": "error"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum SowellianGovernance.Outcome",
+        "name": "finalOutcome",
+        "type": "uint8"
+      }
+    ],
+    "name": "AdjudicationFinalized",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "voter",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum SowellianGovernance.Outcome",
+        "name": "vote",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "weight",
+        "type": "uint256"
+      }
+    ],
+    "name": "AdjudicationVoteCast",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "bool",
+        "name": "approved",
+        "type": "bool"
+      }
+    ],
+    "name": "ApprovalFinalized",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "voter",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum SowellianGovernance.VoteType",
+        "name": "support",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "weight",
+        "type": "uint256"
+      }
+    ],
+    "name": "ApprovalVoteCast",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [],
+    "name": "ConfigUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "previousToken",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "newToken",
+        "type": "address"
+      }
+    ],
+    "name": "GovernanceTokenUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "payout",
+        "type": "uint256"
+      }
+    ],
+    "name": "PositionClaimed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "account",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum SowellianGovernance.Side",
+        "name": "side",
+        "type": "uint8"
+      },
+      {
+        "indexed": false,
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "PositionTaken",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "proposer",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "string",
+        "name": "metadataURI",
+        "type": "string"
+      }
+    ],
+    "name": "ProposalCreated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "ProposalExecuted",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "challenger",
+        "type": "address"
+      }
+    ],
+    "name": "ResolutionChallenged",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum SowellianGovernance.Outcome",
+        "name": "outcome",
+        "type": "uint8"
+      }
+    ],
+    "name": "ResolutionFinalizedUnchallenged",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "resolver",
+        "type": "address"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum SowellianGovernance.Outcome",
+        "name": "outcome",
+        "type": "uint8"
+      }
+    ],
+    "name": "ResolutionProposed",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "int256",
+        "name": "observedValue",
+        "type": "int256"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum SowellianGovernance.Outcome",
+        "name": "outcome",
+        "type": "uint8"
+      }
+    ],
+    "name": "ResolvedViaOracle",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "previousTreasury",
+        "type": "address"
+      },
+      {
+        "indexed": true,
+        "internalType": "address",
+        "name": "newTreasury",
+        "type": "address"
+      }
+    ],
+    "name": "TreasuryUpdated",
+    "type": "event"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "enum SowellianGovernance.Outcome",
+        "name": "vote",
+        "type": "uint8"
+      }
+    ],
+    "name": "castAdjudicationVote",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "weight",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "enum SowellianGovernance.VoteType",
+        "name": "support",
+        "type": "uint8"
+      }
+    ],
+    "name": "castApprovalVote",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "weight",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "challengeResolution",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "claimPosition",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "config",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "proposalBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "approvalVotingDelay",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "approvalVotingPeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "approvalQuorumBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "approvalThresholdBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint32",
+            "name": "positionsWindow",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "executionTimelockDelay",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "resolutionBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "challengePeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "challengeBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "adjudicationVotingPeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "adjudicationQuorumBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "adjudicationThresholdBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint32",
+            "name": "maxOracleStaleness",
+            "type": "uint32"
+          }
+        ],
+        "internalType": "struct SowellianGovernance.SowellianConfig",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "creator",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "daoName",
+    "outputs": [
+      {
+        "internalType": "string",
+        "name": "",
+        "type": "string"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "executeProposal",
+    "outputs": [],
+    "stateMutability": "payable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "finalizeAdjudication",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "finalizeApproval",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "finalizeUnchallenged",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "getProposal",
+    "outputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "id",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "proposer",
+            "type": "address"
+          },
+          {
+            "components": [
+              {
+                "internalType": "address",
+                "name": "target",
+                "type": "address"
+              },
+              {
+                "internalType": "uint256",
+                "name": "value",
+                "type": "uint256"
+              },
+              {
+                "internalType": "bytes",
+                "name": "data",
+                "type": "bytes"
+              }
+            ],
+            "internalType": "struct SowellianGovernance.ProposalAction[]",
+            "name": "actions",
+            "type": "tuple[]"
+          },
+          {
+            "internalType": "string",
+            "name": "metadataURI",
+            "type": "string"
+          },
+          {
+            "internalType": "enum SowellianGovernance.Phase",
+            "name": "phase",
+            "type": "uint8"
+          },
+          {
+            "internalType": "enum SowellianGovernance.ResolutionMethod",
+            "name": "resolutionMethod",
+            "type": "uint8"
+          },
+          {
+            "internalType": "address",
+            "name": "oracle",
+            "type": "address"
+          },
+          {
+            "internalType": "int256",
+            "name": "targetValue",
+            "type": "int256"
+          },
+          {
+            "internalType": "bool",
+            "name": "targetIsMinimum",
+            "type": "bool"
+          },
+          {
+            "internalType": "uint256",
+            "name": "measurementPeriod",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvalSnapshotBlock",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvalStartBlock",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvalEndBlock",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "positionsDeadline",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "executedAt",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "measurementDeadline",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "challengeDeadline",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "positionsOpenSnapshotBlock",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "adjudicationEndBlock",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvalForVotes",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvalAgainstVotes",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "approvalAbstainVotes",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "proposalBond",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "yesPool",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "noPool",
+            "type": "uint256"
+          },
+          {
+            "internalType": "address",
+            "name": "resolver",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "resolutionBond",
+            "type": "uint256"
+          },
+          {
+            "internalType": "enum SowellianGovernance.Outcome",
+            "name": "proposedOutcome",
+            "type": "uint8"
+          },
+          {
+            "internalType": "address",
+            "name": "challenger",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "challengeBond",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "adjudicateSuccessVotes",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint256",
+            "name": "adjudicateFailureVotes",
+            "type": "uint256"
+          },
+          {
+            "internalType": "enum SowellianGovernance.Outcome",
+            "name": "finalOutcome",
+            "type": "uint8"
+          }
+        ],
+        "internalType": "struct SowellianGovernance.Proposal",
+        "name": "",
+        "type": "tuple"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "governanceToken",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "noPosition",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "positionClaimed",
+    "outputs": [
+      {
+        "internalType": "bool",
+        "name": "",
+        "type": "bool"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "proposalCount",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "address",
+            "name": "target",
+            "type": "address"
+          },
+          {
+            "internalType": "uint256",
+            "name": "value",
+            "type": "uint256"
+          },
+          {
+            "internalType": "bytes",
+            "name": "data",
+            "type": "bytes"
+          }
+        ],
+        "internalType": "struct SowellianGovernance.ProposalAction[]",
+        "name": "actions",
+        "type": "tuple[]"
+      },
+      {
+        "internalType": "string",
+        "name": "metadataURI",
+        "type": "string"
+      },
+      {
+        "internalType": "enum SowellianGovernance.ResolutionMethod",
+        "name": "resolutionMethod",
+        "type": "uint8"
+      },
+      {
+        "internalType": "address",
+        "name": "oracle",
+        "type": "address"
+      },
+      {
+        "internalType": "int256",
+        "name": "targetValue",
+        "type": "int256"
+      },
+      {
+        "internalType": "bool",
+        "name": "targetIsMinimum",
+        "type": "bool"
+      },
+      {
+        "internalType": "uint256",
+        "name": "measurementPeriod",
+        "type": "uint256"
+      }
+    ],
+    "name": "propose",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "enum SowellianGovernance.Outcome",
+        "name": "outcome",
+        "type": "uint8"
+      }
+    ],
+    "name": "proposeResolution",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      }
+    ],
+    "name": "resolveViaOracle",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newToken",
+        "type": "address"
+      }
+    ],
+    "name": "setGovernanceToken",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "newTreasury",
+        "type": "address"
+      }
+    ],
+    "name": "setTreasury",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "proposalId",
+        "type": "uint256"
+      },
+      {
+        "internalType": "enum SowellianGovernance.Side",
+        "name": "side",
+        "type": "uint8"
+      },
+      {
+        "internalType": "uint256",
+        "name": "amount",
+        "type": "uint256"
+      }
+    ],
+    "name": "takePosition",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [],
+    "name": "treasury",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "components": [
+          {
+            "internalType": "uint256",
+            "name": "proposalBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "approvalVotingDelay",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "approvalVotingPeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "approvalQuorumBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "approvalThresholdBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint32",
+            "name": "positionsWindow",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint32",
+            "name": "executionTimelockDelay",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "resolutionBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "challengePeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint256",
+            "name": "challengeBondAmount",
+            "type": "uint256"
+          },
+          {
+            "internalType": "uint32",
+            "name": "adjudicationVotingPeriod",
+            "type": "uint32"
+          },
+          {
+            "internalType": "uint16",
+            "name": "adjudicationQuorumBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint16",
+            "name": "adjudicationThresholdBps",
+            "type": "uint16"
+          },
+          {
+            "internalType": "uint32",
+            "name": "maxOracleStaleness",
+            "type": "uint32"
+          }
+        ],
+        "internalType": "struct SowellianGovernance.SowellianConfig",
+        "name": "newConfig",
+        "type": "tuple"
+      }
+    ],
+    "name": "updateConfig",
+    "outputs": [],
+    "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      },
+      {
+        "internalType": "address",
+        "name": "",
+        "type": "address"
+      }
+    ],
+    "name": "yesPosition",
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "",
+        "type": "uint256"
+      }
+    ],
+    "stateMutability": "view",
+    "type": "function"
+  }
+]
