@@ -170,3 +170,19 @@ export async function getConfig(governanceAddress) {
   const gov = contractFor(governanceAddress);
   return publicClient.readContract({ ...gov, functionName: "config", args: [] });
 }
+
+/**
+ * Board-specific equivalent of common.js's shared getDaoInfo - Board is
+ * deliberately excluded from that shared table (no governanceToken at
+ * all), so this lives here instead. No tokenAddress field, since there
+ * genuinely isn't one for this model.
+ */
+export async function getDaoInfo(governanceAddress) {
+  const gov = contractFor(governanceAddress);
+  const [daoName, treasuryAddress, config] = await Promise.all([
+    publicClient.readContract({ ...gov, functionName: "daoName" }),
+    publicClient.readContract({ ...gov, functionName: "treasury" }),
+    publicClient.readContract({ ...gov, functionName: "config" }),
+  ]);
+  return { daoName, treasuryAddress, config };
+}

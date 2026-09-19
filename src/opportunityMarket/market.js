@@ -159,14 +159,22 @@ export async function reclaimStake(client, marketAddress) {
  * backer's own private stake can later be divided against it (see
  * OpportunityMarket.sol's own doc comment on why: encrypted-by-
  * encrypted division isn't supported by the FHE library at all).
- * Returns a handle - completeWinningTotalReveal finishes this once
- * Zama's relayer has produced the decryption proof.
+ * Returns the real handle finalizeWinningTotal() returns on-chain -
+ * captured via simulateContract before sending, since a write
+ * transaction's return value isn't otherwise directly observable from
+ * its hash or receipt. publicReveal.js's revealAndCompleteWinningTotal
+ * uses this handle to finish the reveal.
  */
 export async function finalizeWinningTotal(client, marketAddress) {
   const gov = marketContract(marketAddress);
+  const { result: handle } = await opportunityPublicClient.simulateContract({
+    ...gov,
+    functionName: "finalizeWinningTotal",
+    account: client.account,
+  });
   const hash = await client.writeContract({ ...gov, functionName: "finalizeWinningTotal", args: [] });
-  const receipt = await opportunityPublicClient.waitForTransactionReceipt({ hash });
-  return { hash, receipt };
+  await opportunityPublicClient.waitForTransactionReceipt({ hash });
+  return { hash, handle };
 }
 
 /**
@@ -194,20 +202,30 @@ export async function computeReward(client, marketAddress) {
   return { hash };
 }
 
-/** Requests withdrawal of the caller's (already-computed, still-encrypted) stake balance. Returns a handle. */
+/** Requests withdrawal of the caller's (already-computed, still-encrypted) stake balance. Returns the real on-chain handle, same simulate-then-write pattern as finalizeWinningTotal. */
 export async function requestWithdrawal(client, marketAddress) {
   const gov = marketContract(marketAddress);
+  const { result: handle } = await opportunityPublicClient.simulateContract({
+    ...gov,
+    functionName: "requestWithdrawal",
+    account: client.account,
+  });
   const hash = await client.writeContract({ ...gov, functionName: "requestWithdrawal", args: [] });
-  const receipt = await opportunityPublicClient.waitForTransactionReceipt({ hash });
-  return { hash, receipt };
+  await opportunityPublicClient.waitForTransactionReceipt({ hash });
+  return { hash, handle };
 }
 
-/** Requests withdrawal of the caller's (already-computed, still-encrypted) reward balance. Returns a handle. */
+/** Requests withdrawal of the caller's (already-computed, still-encrypted) reward balance. Returns the real on-chain handle, same pattern. */
 export async function requestRewardWithdrawal(client, marketAddress) {
   const gov = marketContract(marketAddress);
+  const { result: handle } = await opportunityPublicClient.simulateContract({
+    ...gov,
+    functionName: "requestRewardWithdrawal",
+    account: client.account,
+  });
   const hash = await client.writeContract({ ...gov, functionName: "requestRewardWithdrawal", args: [] });
-  const receipt = await opportunityPublicClient.waitForTransactionReceipt({ hash });
-  return { hash, receipt };
+  await opportunityPublicClient.waitForTransactionReceipt({ hash });
+  return { hash, handle };
 }
 
 /** Completes a pending withdrawal using the cleartext and proof for `handle`. Plain bytes, same reasoning as completeWinningTotalReveal. */

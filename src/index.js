@@ -1,6 +1,6 @@
 import { Bot } from "grammy";
-import { isAddress, getAddress } from "viem";
-import { BOT_TOKEN, monadTestnet } from "./config.js";
+import { isAddress, getAddress, parseEther } from "viem";
+import { BOT_TOKEN, monadTestnet, publicClient } from "./config.js";
 import {
   registerChat,
   getChatDAO,
@@ -8,6 +8,9 @@ import {
   unregisterChat,
   registerDistributor,
   getChatDistributor,
+  registerMarket,
+  getChatMarket,
+  unregisterMarket,
 } from "./db.js";
 import {
   getProposalCount,
@@ -32,6 +35,13 @@ import {
 } from "./governance/common.js";
 import { short, stateLine, formatDate } from "./format.js";
 import { deriveUserWallet, isWalletDerivationConfigured } from "./wallet.js";
+import { getOrCreateUserAccount, getUserAddress } from "./walletResolver.js";
+import { findWalletRecord, createWalletRecord, isWalletStoreConfigured } from "./walletStore.js";
+import { opportunityWalletClientFor, isOpportunityMarketConfigured } from "./opportunityMarket/config.js";
+import * as opportunityMarket from "./opportunityMarket/market.js";
+import { back as opportunityBack } from "./opportunityMarket/encryptedBet.js";
+import { getBalance as opportunityGetBalance, getBet as opportunityGetBet, getAllBets as opportunityGetAllBets } from "./opportunityMarket/decrypt.js";
+import { revealAndCompleteWinningTotal, revealAndCompleteWithdrawal } from "./opportunityMarket/publicReveal.js";
 
 const bot = new Bot(BOT_TOKEN);
 
@@ -50,6 +60,24 @@ async function requireDAO(ctx) {
   return address;
 }
 
+/**
+ * Requires the chat to have a linked OpportunityMarket; replies and
+ * returns null if not. Deliberately separate from requireDAO - a chat
+ * can have both a DAO and a market linked at once, these are
+ * independent systems.
+ */
+async function requireMarket(ctx) {
+  const address = getChatMarket(ctx.chat.id);
+  if (!address) {
+    await ctx.reply(
+      "This group isn't linked to an Opportunity Market yet. An admin can run:\n`/registermarket 0xYourMarketAddress`\n\nOr create a new one with `/createmarket 0xUnderlyingToken`.",
+      { parse_mode: "Markdown" }
+    );
+    return null;
+  }
+  return address;
+}
+
 /*//////////////////////////////////////////////////////////////
                             /start, /help
 //////////////////////////////////////////////////////////////*/
@@ -58,37 +86,179 @@ bot.command("start", (ctx) =>
   ctx.reply("👋 I'm Protean — I connect this chat to an on-chain DAO.\n\nRun /help to see what I can do.")
 );
 
-bot.command("help", (ctx) =>
-  ctx.reply(
-    [
-      "*Setup*",
-      "/createdao `<name> <symbol> <initialSupply> <maxSupply>` — deploy a new DAO and link it here",
-      "/register `<governance_address>` — link this group to an existing DAO (admin)",
-      "/unregister — unlink this group (admin)",
-      "/setdistributor `<address>` — link a welcome-token distributor (admin)",
+/**
+ * Per-model DAO-lifecycle command block. Deliberately NOT derived from a
+ * pure `typeof adapter.propose === "function"` check - several adapters
+ * export propose/vote/queue/cancel that intentionally throw (see each
+ * adapter's own module-level note for why), so existence alone can't
+ * tell "this works" from "this exists only to redirect you elsewhere."
+ * Each entry here reflects exactly what actually works for that model,
+ * cross-checked against the real adapters, not assumed.
+ */
+const MODEL_HELP_BLOCKS = {
+  tokenWeighted: [
+    "/propose `<target> <value> <data> <description>` — create a proposal",
+    "/vote `<id> for|against|abstain [reason]` — cast a vote",
+    "/queue `<id>` — queue a passed proposal",
+    "/execute `<id>` — execute a queued proposal",
+    "/cancel `<id>` — cancel your own proposal",
+  ],
+  quadratic: [
+    "/propose `<target> <value> <data> <description>` — create a proposal",
+    "/vote `<id> for|against|abstain` — cast a vote (weight is √ of your staked balance)",
+    "/queue `<id>` — queue a passed proposal",
+    "/execute `<id>` — execute a queued proposal",
+    "/cancel `<id>` — cancel your own proposal",
+  ],
+  liquid: [
+    "/propose `<target> <value> <data> <description>` — create a proposal",
+    "/vote `<id> for|against|abstain` — cast a vote",
+    "/queue `<id>` — queue a passed proposal",
+    "/execute `<id>` — execute a queued proposal",
+    "/cancel `<id>` — cancel your own proposal",
+    "/delegate `<address>` — send your voting power to someone else",
+    "/undelegate — take your voting power back",
+  ],
+  optimistic: [
+    "/propose `<target> <value> <data> <description>` — create a proposal (passes by default unless challenged)",
+    "/challenge `<id>` — dispute a proposal within its challenge window, opening a fallback vote",
+    "/vote `<id> for|against|abstain` — vote (only works once a proposal has been challenged)",
+    "/queue `<id>` — finalizes a proposal, whether challenged or not",
+    "/execute `<id>` — execute a queued proposal",
+    "/cancel `<id>` — cancel your own proposal",
+  ],
+  delegate: [
+    "/propose `<target> <value> <data> <description>` — create a proposal (council members only)",
+    "/vote `<id> for|against|abstain` — cast a vote (council members only)",
+    "/queue `<id>` — queue a passed proposal",
+    "/execute `<id>` — execute a queued proposal",
+    "/cancel `<id>` — cancel your own proposal",
+    "/council — see the current council",
+    "/startelection — open a new council election",
+    "/declarecandidacy `<electionId>` — run for council",
+    "/voteinelection `<electionId> <candidate...>` — vote for candidates",
+    "/finalizeelection `<electionId>` — close the election and seat the new council",
+    "/initiaterecall `<address>` — start a vote to remove a sitting council member",
+    "/voterecall `<recallId> for|against|abstain` — vote on a recall",
+    "/finalizerecall `<recallId>` — close the recall vote",
+  ],
+  board: [
+    "/propose `<target> <value> <data> <description>` — create a proposal",
+    "/confirm `<id>` — confirm a proposal as a signer",
+    "/revoke `<id>` — withdraw your confirmation",
+    "/execute `<id>` — execute a proposal once enough signers confirmed",
+    "/cancel `<id>` — cancel your own proposal",
+  ],
+  sortition: [
+    "/propose `<target> <value> <data> <description>` — create a proposal (anyone meeting the eligibility threshold)",
+    "/vote `<id> for|against|abstain` — cast a vote (council members only)",
+    "/queue `<id>` — queue a passed proposal",
+    "/execute `<id>` — execute a queued proposal",
+    "/cancel `<id>` — cancel your own proposal",
+    "/council — see the current council",
+    "/registereligible — opt into the pool for future sortition draws",
+    "/withdraweligibility — opt back out",
+    "/startsortition — request a random draw for a new council",
+    "/finalizesortition — draw the new council once randomness is ready",
+  ],
+  conviction: [
+    "/propose `<target> <value> <data> <description>` — create a proposal",
+    "/support `<id>` — back a proposal with your entire staked balance",
+    "/withdrawsupport — stop backing whatever you're currently supporting",
+    "/mysupport — check which proposal (if any) you're currently backing",
+    "/queue `<id>` — queue once accumulated conviction clears the threshold",
+    "/execute `<id>` — execute a queued proposal",
+    "/cancel `<id>` — cancel your own proposal",
+  ],
+  sowellian: [
+    "/proposecriteria `<target> <value> <data> <oracle|human> <oracleAddress|-> <targetValue> <min|max> <measurementPeriod> <description>` — create a proposal",
+    "/castapprovalvote `<id> for|against|abstain` — vote on whether it opens for betting",
+    "/finalizeapproval `<id>` — close the approval vote",
+    "/takeposition `<id> yes|no <amount>` — back an outcome",
+    "/execute `<id>` — run the proposal's actions once positions close",
+    "/resolveviaoracle `<id>` — resolve automatically (oracle-track proposals)",
+    "/proposeresolution `<id> success|failure` — state what you believe happened (human-track)",
+    "/challengeresolution `<id>` — dispute a proposed resolution",
+    "/finalizeunchallenged `<id>` — finalize a resolution nobody disputed",
+    "/castadjudicationvote `<id> success|failure` — vote on a disputed resolution",
+    "/finalizeadjudication `<id>` — close the adjudication vote",
+    "/claimposition `<id>` — collect your share if you backed the winning side",
+  ],
+  decisionMarkets: [
+    "/proposemarket `<target> <value> <data> <baseSeedAmount> <quoteSeedAmountMON> <description>` — create a proposal, seeding both markets",
+    "/trade `<id> pass|fail base|quote <amountIn> <minAmountOut>` — back an outcome by trading",
+    "/finalizeproposal `<id>` — compare both markets' prices and resolve",
+    "/execute `<id>` — execute a passed proposal",
+    "/cancel `<id>` — cancel your own proposal",
+    "/reclaimliquidity `<id>` — recover a finalized proposal's seed liquidity",
+  ],
+};
+
+bot.command("help", async (ctx) => {
+  const lines = [
+    "*Setup*",
+    "/createdao `<name> <symbol> <initialSupply> <maxSupply>` — deploy a new DAO and link it here",
+    "/register `<governance_address> [model]` — link this group to an existing DAO (admin)",
+    "/unregister — unlink this group (admin)",
+    "/setdistributor `<address>` — link a welcome-token distributor (admin)",
+    "",
+    "*Your wallet*",
+    "/wallet — show your wallet address (generated automatically, no setup needed)",
+    "/migratewallet — move funds from the old wallet system to the new one, if you have any",
+  ];
+
+  const daoAddress = getChatDAO(ctx.chat.id);
+  if (daoAddress) {
+    const model = getChatModel(ctx.chat.id);
+    lines.push(
       "",
-      "*Your wallet*",
-      "/wallet — show your wallet address (generated automatically, no setup needed)",
-      "",
-      "*DAO info*",
+      `*DAO info* (this group's DAO uses ${model} governance)`,
       "/dao — DAO name, token, treasury, config",
       "/treasury — current treasury balance",
       "/contribute — get the treasury address to send funds to",
       "/balance `[address]` — staked voting power (yours, or an address)",
-      "",
-      "*Proposals & voting*",
       "/proposals — list proposals",
-      "/proposal `<id>` — full detail on one proposal",
-      "/stake `<amount>` — stake tokens to activate voting power",
-      "/propose `<target> <value> <data> <description>` — create a proposal",
-      "/vote `<id> for|against|abstain` — cast a vote",
+      "/proposal `<id>` — full detail on one proposal"
+    );
+    if (hasToken(model)) {
+      lines.push("/stake `<amount>` — stake tokens to activate voting power", "/unstake `<amount>` — return staked tokens");
+    }
+    lines.push("", "*Proposals & actions for this DAO*", ...(MODEL_HELP_BLOCKS[model] ?? ["No commands known for this model."]));
+  } else {
+    lines.push("", "_This group isn't linked to a DAO yet - run /register or /createdao to see DAO commands here._");
+  }
+
+  const marketAddress = getChatMarket(ctx.chat.id);
+  if (marketAddress) {
+    lines.push(
       "",
-      "*Welcome tokens*",
-      "/claim — claim your welcome tokens",
-    ].join("\n"),
-    { parse_mode: "Markdown" }
-  )
-);
+      "*Opportunity Market* (linked to this group)",
+      "/listopportunity `<metadataURI>` — list something people can back",
+      "/deposit `<amount>` — deposit the underlying token",
+      "/back `<opportunityId> <amount>` — confidentially back an opportunity",
+      "/mybalance — decrypt your own balance",
+      "/mybet `<index>` — decrypt one of your own bets",
+      "/reclaimstake — reclaim your stake after resolution",
+      "/computereward — compute your reward once the winning total is revealed",
+      "/withdraw — withdraw your stake",
+      "/withdrawreward — withdraw your reward",
+      "/fundrewardpool `<amount>` — deployer only",
+      "/resolve `<winningOpportunityId>` — deployer only",
+      "/cancelmarket — deployer only",
+      "/revealwinningtotal — deployer only, publicly reveals the aggregate total",
+      "/allbets — deployer only, decrypts every bet at once"
+    );
+  } else {
+    lines.push(
+      "",
+      "_No Opportunity Market linked - /registermarket `<address>` or /createmarket `<underlyingToken>` to link one, /unregistermarket to unlink._"
+    );
+  }
+
+  lines.push("", "*Welcome tokens*", "/claim — claim your welcome tokens");
+
+  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+});
 
 /*//////////////////////////////////////////////////////////////
                             /createdao
@@ -231,20 +401,88 @@ bot.command("setdistributor", async (ctx) => {
 //////////////////////////////////////////////////////////////*/
 
 bot.command("wallet", async (ctx) => {
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
   try {
-    const account = deriveUserWallet(ctx.from.id);
+    const account = await getOrCreateUserAccount(ctx.from.id);
     await ctx.reply(
       `Your wallet:\n\`${account.address}\`\n\nTap the address above to copy it. This wallet is generated automatically from your Telegram account — no separate connect step needed.`,
       { parse_mode: "Markdown" }
     );
   } catch (err) {
     console.error(err);
-    await ctx.reply("Couldn't generate your wallet right now.");
+    await ctx.reply(err.message || "Couldn't generate your wallet right now.");
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                          /migratewallet
+//////////////////////////////////////////////////////////////*/
+
+bot.command("migratewallet", async (ctx) => {
+  if (!isWalletDerivationConfigured()) {
+    await ctx.reply("The old wallet system isn't configured on this bot - nothing to migrate.");
+    return;
+  }
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("The new wallet system isn't configured on this bot yet - ask an admin.");
+    return;
+  }
+
+  const oldAccount = deriveUserWallet(ctx.from.id);
+  const statusMsg = await ctx.reply("⏳ Checking your old wallet…");
+
+  try {
+    const nativeBalance = await publicClient.getBalance({ address: oldAccount.address });
+
+    const existing = await findWalletRecord("telegram", ctx.from.id);
+    const newAddress = existing ? existing.address : (await createWalletRecord("telegram", ctx.from.id)).address;
+
+    if (nativeBalance === 0n) {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `Your old wallet has no native MON balance to move. Your new wallet is ready: \`${short(newAddress)}\`.\n\n` +
+          `⚠️ This only sweeps native MON automatically - if you hold ERC20 tokens under the old address ` +
+          `(\`${short(oldAccount.address)}\`), move those manually too.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const GAS_RESERVE = parseEther("0.005"); // matches this bot's MIN_GAS_BALANCE convention elsewhere
+    if (nativeBalance <= GAS_RESERVE) {
+      await ctx.api.editMessageText(
+        ctx.chat.id,
+        statusMsg.message_id,
+        `Your old wallet's balance (${formatEther(nativeBalance)} MON) is too small to cover gas for a transfer. ` +
+          `New wallet ready: \`${short(newAddress)}\`.`,
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+
+    const oldClient = walletClientFor(oldAccount);
+    const sendAmount = nativeBalance - GAS_RESERVE;
+
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "⏳ Moving your balance to the new wallet…");
+    const hash = await oldClient.sendTransaction({ to: newAddress, value: sendAmount });
+    await publicClient.waitForTransactionReceipt({ hash });
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Moved ${formatEther(sendAmount)} MON to your new wallet \`${short(newAddress)}\`. Every command now uses this wallet.\n\n` +
+        `⚠️ This only sweeps native MON - if you hold ERC20 tokens under the old address ` +
+        `(\`${short(oldAccount.address)}\`), move those manually too.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Migration failed: ${err.shortMessage || err.message}`);
   }
 });
 
@@ -258,7 +496,10 @@ bot.command("contribute", async (ctx) => {
 
   try {
     const model = getChatModel(ctx.chat.id);
-    const { daoName, treasuryAddress } = await getDaoInfo(model, address);
+    const adapter = getAdapter(model);
+    const { daoName, treasuryAddress } = hasToken(model)
+      ? await getDaoInfo(model, address)
+      : await adapter.getDaoInfo(address);
     const message = [
       `💰 *Contribute to ${daoName}*`,
       "",
@@ -292,28 +533,125 @@ bot.command("contribute", async (ctx) => {
                                 /dao
 //////////////////////////////////////////////////////////////*/
 
+// Per-model config display for /dao - every model genuinely has a
+// different config struct shape, confirmed directly from each
+// contract's real struct fields, not assumed. tokenWeighted/quadratic/
+// liquid happen to share the exact same 7-field shape; every other
+// model differs, several completely.
+function hoursFrom(seconds) {
+  return (Number(seconds) / 3600).toFixed(1);
+}
+
+const STANDARD_CONFIG_LINES = (c) => [
+  `Quorum: ${Number(c.quorumBps) / 100}%`,
+  `Approval threshold: ${Number(c.approvalThresholdBps) / 100}%`,
+  `Voting delay: ${c.votingDelay} blocks`,
+  `Voting period: ${c.votingPeriod} blocks`,
+  `Timelock: ${hoursFrom(c.timelockDelay)}h`,
+  `Execution window: ${hoursFrom(c.executionPeriod)}h`,
+  `Proposal threshold: ${formatEther(c.proposalThreshold)} tokens`,
+];
+
+const CONFIG_DISPLAY_BY_MODEL = {
+  tokenWeighted: STANDARD_CONFIG_LINES,
+  quadratic: STANDARD_CONFIG_LINES,
+  liquid: STANDARD_CONFIG_LINES,
+  optimistic: (c) => [
+    `Challenge period: ${hoursFrom(c.challengePeriod)}h`,
+    `Challenge bond: ${formatEther(c.challengeBond)} tokens`,
+    `Quorum (if challenged): ${Number(c.quorumBps) / 100}%`,
+    `Approval threshold (if challenged): ${Number(c.approvalThresholdBps) / 100}%`,
+    `Voting period (if challenged): ${c.votingPeriod} blocks`,
+    `Timelock: ${hoursFrom(c.timelockDelay)}h`,
+    `Execution window: ${hoursFrom(c.executionPeriod)}h`,
+    `Proposal threshold: ${formatEther(c.proposalThreshold)} tokens`,
+  ],
+  delegate: (c) => [
+    `Council size: ${c.councilSize}`,
+    `Term length: ${(Number(c.termLength) / 86400).toFixed(1)} days`,
+    `Candidacy threshold: ${formatEther(c.candidacyThreshold)} tokens`,
+    `Candidacy period: ${c.candidacyPeriod} blocks`,
+    `Election voting period: ${c.electionVotingPeriod} blocks`,
+    `Council quorum: ${c.councilQuorum}`,
+    `Council approval threshold: ${Number(c.councilApprovalThresholdBps) / 100}%`,
+    `Voting delay: ${c.votingDelay} blocks`,
+    `Voting period: ${c.votingPeriod} blocks`,
+    `Timelock: ${hoursFrom(c.timelockDelay)}h`,
+    `Execution window: ${hoursFrom(c.executionPeriod)}h`,
+    `Recall quorum: ${Number(c.recallQuorumBps) / 100}%`,
+    `Recall approval threshold: ${Number(c.recallApprovalThresholdBps) / 100}%`,
+    `Recall voting period: ${c.recallVotingPeriod} blocks`,
+  ],
+  board: (c) => [
+    `Required approvals: ${c.requiredApprovals}`,
+    `Timelock: ${hoursFrom(c.timelockDelay)}h`,
+    `Execution window: ${hoursFrom(c.executionPeriod)}h`,
+  ],
+  sortition: (c) => [
+    `Council size: ${c.councilSize}`,
+    `Term length: ${(Number(c.termLength) / 86400).toFixed(1)} days`,
+    `Eligibility threshold: ${formatEther(c.eligibilityThreshold)} tokens`,
+    `Council quorum: ${c.councilQuorum}`,
+    `Council approval threshold: ${Number(c.councilApprovalThresholdBps) / 100}%`,
+    `Voting delay: ${c.votingDelay} blocks`,
+    `Voting period: ${c.votingPeriod} blocks`,
+    `Timelock: ${hoursFrom(c.timelockDelay)}h`,
+    `Execution window: ${hoursFrom(c.executionPeriod)}h`,
+  ],
+  conviction: (c) => [
+    `Conviction growth rate: ${c.convictionGrowthRate} per block`,
+    `Min threshold conviction: ${formatEther(c.minThresholdConviction)}`,
+    `Threshold multiplier: ${c.thresholdMultiplier} per token requested`,
+    `Proposal threshold: ${formatEther(c.proposalThreshold)} tokens`,
+    `Timelock: ${hoursFrom(c.timelockDelay)}h`,
+    `Execution window: ${hoursFrom(c.executionPeriod)}h`,
+  ],
+  sowellian: (c) => [
+    `Proposal bond: ${formatEther(c.proposalBondAmount)} tokens`,
+    `Approval voting delay: ${c.approvalVotingDelay} blocks`,
+    `Approval voting period: ${c.approvalVotingPeriod} blocks`,
+    `Approval quorum: ${Number(c.approvalQuorumBps) / 100}%`,
+    `Approval threshold: ${Number(c.approvalThresholdBps) / 100}%`,
+    `Positions window: ${hoursFrom(c.positionsWindow)}h`,
+    `Execution timelock: ${hoursFrom(c.executionTimelockDelay)}h`,
+    `Resolution bond: ${formatEther(c.resolutionBondAmount)} tokens`,
+    `Challenge period: ${hoursFrom(c.challengePeriod)}h`,
+    `Challenge bond: ${formatEther(c.challengeBondAmount)} tokens`,
+    `Adjudication voting period: ${c.adjudicationVotingPeriod} blocks`,
+    `Adjudication quorum: ${Number(c.adjudicationQuorumBps) / 100}%`,
+    `Adjudication threshold: ${Number(c.adjudicationThresholdBps) / 100}%`,
+    `Max oracle staleness: ${hoursFrom(c.maxOracleStaleness)}h`,
+  ],
+  decisionMarkets: (c) => [
+    `Trading period: ${hoursFrom(c.tradingPeriod)}h`,
+    `Pass must beat fail by: ${Number(c.thresholdBps) / 100}%`,
+    `Timelock: ${hoursFrom(c.timelockDelay)}h`,
+    `Execution window: ${hoursFrom(c.executionPeriod)}h`,
+  ],
+};
+
 bot.command("dao", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
 
   try {
     const model = getChatModel(ctx.chat.id);
-    const { daoName, tokenAddress, treasuryAddress, config } = await getDaoInfo(model, address);
+    // Board is deliberately excluded from common.js's shared getDaoInfo
+    // (no governanceToken at all) - use its own adapter-level version
+    // instead, which has no tokenAddress field to begin with.
+    const adapter = getAdapter(model);
+    const { daoName, tokenAddress, treasuryAddress, config } = hasToken(model)
+      ? await getDaoInfo(model, address)
+      : await adapter.getDaoInfo(address);
 
     const lines = [
       `*${daoName}*`,
       `Governance: \`${short(address)}\``,
-      `Token: \`${short(tokenAddress)}\``,
+      hasToken(model) ? `Token: \`${short(tokenAddress)}\`` : null,
       `Treasury: \`${short(treasuryAddress)}\``,
       "",
-      `Quorum: ${Number(config.quorumBps) / 100}%`,
-      `Approval threshold: ${Number(config.approvalThresholdBps) / 100}%`,
-      `Voting delay: ${config.votingDelay} blocks`,
-      `Voting period: ${config.votingPeriod} blocks`,
-      `Timelock: ${Number(config.timelockDelay) / 3600}h`,
-      `Execution window: ${Number(config.executionPeriod) / 3600}h`,
-      `Proposal threshold: ${formatEther(config.proposalThreshold)} tokens`,
-    ];
+      ...(CONFIG_DISPLAY_BY_MODEL[model]?.(config) ?? ["Config format not known for this model."]),
+    ].filter(Boolean);
 
     await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
   } catch (err) {
@@ -332,7 +670,8 @@ bot.command("treasury", async (ctx) => {
 
   try {
     const model = getChatModel(ctx.chat.id);
-    const { treasuryAddress } = await getDaoInfo(model, address);
+    const adapter = getAdapter(model);
+    const { treasuryAddress } = hasToken(model) ? await getDaoInfo(model, address) : await adapter.getDaoInfo(address);
     const balance = await getTreasuryBalance(treasuryAddress);
     await ctx.reply(`🏦 Treasury \`${short(treasuryAddress)}\`\nBalance: *${balance} MON*`, {
       parse_mode: "Markdown",
@@ -366,14 +705,14 @@ bot.command("balance", async (ctx) => {
   }
 
   if (!target) {
-    if (!isWalletDerivationConfigured()) {
+    if (!isWalletStoreConfigured()) {
       await ctx.reply(
         "No address given, and wallets aren't set up.\nUse `/balance 0xSomeAddress`.",
         { parse_mode: "Markdown" }
       );
       return;
     }
-    target = deriveUserWallet(ctx.from.id).address;
+    target = await getUserAddress(ctx.from.id);
   }
 
   try {
@@ -406,17 +745,21 @@ bot.command("proposals", async (ctx) => {
   try {
     const count = await getProposalCount(address);
     if (count === 0) {
-      await ctx.reply("No proposals yet. Use /propose to create one (coming soon).");
+      await ctx.reply("No proposals yet. Use /propose to create one.");
       return;
     }
 
+    const model = getChatModel(ctx.chat.id);
+    const adapter = getAdapter(model);
+
     // Most recent first, capped so one command can't dump a huge wall of text.
     const ids = Array.from({ length: Math.min(count, 10) }, (_, i) => count - i);
-    const proposals = await Promise.all(ids.map((id) => getProposal(address, id)));
+    const proposals = await Promise.all(ids.map((id) => adapter.getProposal(address, id)));
 
-    const lines = proposals.map(
-      (p) => `#${p.id} — ${stateLine(p.stateLabel)}\n${p.metadataURI.slice(0, 80)}`
-    );
+    const lines = proposals.map((p) => {
+      const stateLabel = p.stateLabel ?? PROPOSAL_STATE_LABELS[p.stateIndex] ?? "Unknown";
+      return `#${p.id} — ${stateLine(stateLabel)}\n${p.metadataURI.slice(0, 80)}`;
+    });
 
     await ctx.reply(
       `*Proposals* (showing ${ids.length} of ${count})\n\n${lines.join("\n\n")}\n\nUse /proposal \`<id>\` for full detail.`,
@@ -446,31 +789,60 @@ bot.command("proposal", async (ctx) => {
     const model = getChatModel(ctx.chat.id);
     const adapter = getAdapter(model);
     const p = await adapter.getProposal(address, id);
-    const stateLabel = PROPOSAL_STATE_LABELS[p.stateIndex] ?? "Unknown";
-
-    // Vote totals are only safe to run through formatEther when they're
-    // real 18-decimal token amounts - a model like Quadratic reports
-    // sqrt-weighted values on a completely different scale, which would
-    // formatEther into a tiny, meaningless number instead.
-    const formatVotes = (v) => (p.voteWeightUnit === "token" ? formatEther(v) : v.toString());
-    const voteLabel = p.voteWeightUnit === "token" ? "" : " (voting weight)";
+    const stateLabel = p.stateLabel ?? p.statusLabel ?? PROPOSAL_STATE_LABELS[p.stateIndex] ?? "Unknown";
 
     const lines = [
       `*Proposal #${p.id}* — ${stateLine(stateLabel)}`,
       p.metadataURI,
       "",
       `Proposer: \`${short(p.proposer)}\``,
-      `For: ${formatVotes(p.forVotes)} · Against: ${formatVotes(p.againstVotes)} · Abstain: ${formatVotes(p.abstainVotes)}${voteLabel}`,
-      // Not every model exposes a quorum figure directly (Quadratic's
-      // quorum is based on sqrt(totalSupply) and isn't a per-proposal
-      // on-chain view) - omit the line entirely rather than guess at one.
-      "quorumVotes" in p ? `Quorum needed: ${formatEther(p.quorumVotes)}` : null,
-      "",
-      `Voting: block ${p.startBlock} → ${p.endBlock}`,
-      p.queuedAt > 0n ? `Queued at: ${formatDate(p.queuedAt)}` : null,
-      p.executableAfter > 0n ? `Executable after: ${formatDate(p.executableAfter)}` : null,
-      `Actions: ${p.actions.length}`,
-    ].filter(Boolean);
+    ];
+
+    // Vote/support breakdown - genuinely different shape per model,
+    // branched on which fields actually exist rather than assumed
+    // universal. Four models (Conviction, Board, DecisionMarkets,
+    // Sowellian) don't share the original model's forVotes/against/
+    // abstain shape at all - confirmed directly from each contract's
+    // real Proposal struct, not assumed.
+    if ("forVotes" in p) {
+      // Vote totals are only safe to run through formatEther when
+      // they're real 18-decimal token amounts - a model like Quadratic
+      // reports sqrt-weighted values on a completely different scale,
+      // which would formatEther into a tiny, meaningless number instead.
+      const formatVotes = (v) => (p.voteWeightUnit === "token" ? formatEther(v) : v.toString());
+      const voteLabel = p.voteWeightUnit === "token" ? "" : " (voting weight)";
+      lines.push(`For: ${formatVotes(p.forVotes)} · Against: ${formatVotes(p.againstVotes)} · Abstain: ${formatVotes(p.abstainVotes)}${voteLabel}`);
+      if ("quorumVotes" in p) lines.push(`Quorum needed: ${formatEther(p.quorumVotes)}`);
+    } else if ("requiredConviction" in p) {
+      lines.push(`Conviction: ${formatEther(p.currentConviction)} / ${formatEther(p.requiredConviction)} needed`);
+    } else if ("confirmations" in p) {
+      lines.push(`Confirmations: ${p.confirmations}`);
+    } else if ("passTWAP" in p) {
+      lines.push(`Pass TWAP: ${p.passTWAP} · Fail TWAP: ${p.failTWAP}`);
+    } else if ("approvalForVotes" in p) {
+      lines.push(
+        `Approval — For: ${formatEther(p.approvalForVotes)} · Against: ${formatEther(p.approvalAgainstVotes)} · Abstain: ${formatEther(p.approvalAbstainVotes)}`
+      );
+      if ((p.adjudicateSuccessVotes ?? 0n) > 0n || (p.adjudicateFailureVotes ?? 0n) > 0n) {
+        lines.push(`Adjudication — Success: ${formatEther(p.adjudicateSuccessVotes)} · Failure: ${formatEther(p.adjudicateFailureVotes)}`);
+      }
+    }
+
+    lines.push("");
+
+    // Voting/timing window - also genuinely absent for several models
+    // (Board and Conviction have no discrete window at all; Decision
+    // Markets uses a trading deadline instead of start/end blocks) -
+    // checked the same way, not assumed present.
+    if (p.startBlock !== undefined && p.endBlock !== undefined) {
+      lines.push(`Voting: block ${p.startBlock} → ${p.endBlock}`);
+    } else if (p.tradingDeadline !== undefined) {
+      lines.push(`Trading deadline: ${formatDate(p.tradingDeadline)}`);
+    }
+
+    if (p.queuedAt > 0n) lines.push(`Queued at: ${formatDate(p.queuedAt)}`);
+    if (p.executableAfter > 0n) lines.push(`Executable after: ${formatDate(p.executableAfter)}`);
+    lines.push(`Actions: ${p.actions.length}`);
 
     await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
   } catch (err) {
@@ -486,8 +858,8 @@ bot.command("proposal", async (ctx) => {
 bot.command("stake", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -508,7 +880,7 @@ bot.command("stake", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Staking — this takes a moment…");
 
@@ -539,8 +911,8 @@ bot.command("stake", async (ctx) => {
 bot.command("propose", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -575,7 +947,7 @@ bot.command("propose", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Submitting proposal…");
 
@@ -607,8 +979,8 @@ bot.command("propose", async (ctx) => {
 bot.command("proposecriteria", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -651,7 +1023,7 @@ bot.command("proposecriteria", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Submitting proposal…");
 
@@ -696,8 +1068,8 @@ bot.command("proposecriteria", async (ctx) => {
 bot.command("proposemarket", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -735,7 +1107,7 @@ bot.command("proposemarket", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Deploying and seeding both markets — this takes a moment…");
 
@@ -777,8 +1149,8 @@ const VOTE_CHOICES = { for: 1, against: 0, abstain: 2 };
 bot.command("vote", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -792,7 +1164,7 @@ bot.command("vote", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Casting vote…");
 
@@ -825,8 +1197,8 @@ bot.command("vote", async (ctx) => {
 bot.command("queue", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -839,7 +1211,7 @@ bot.command("queue", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Queuing proposal…");
 
@@ -867,8 +1239,8 @@ bot.command("queue", async (ctx) => {
 bot.command("execute", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -882,7 +1254,7 @@ bot.command("execute", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Executing proposal…");
 
@@ -910,8 +1282,8 @@ bot.command("execute", async (ctx) => {
 bot.command("cancel", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -924,7 +1296,7 @@ bot.command("cancel", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Cancelling proposal…");
 
@@ -956,8 +1328,8 @@ bot.command("cancel", async (ctx) => {
 bot.command("confirm", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -974,7 +1346,7 @@ bot.command("confirm", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Confirming…");
 
@@ -999,8 +1371,8 @@ bot.command("confirm", async (ctx) => {
 bot.command("revoke", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1017,7 +1389,7 @@ bot.command("revoke", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Revoking confirmation…");
 
@@ -1042,8 +1414,8 @@ bot.command("revoke", async (ctx) => {
 bot.command("delegate", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1060,7 +1432,7 @@ bot.command("delegate", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Delegating…");
 
@@ -1077,8 +1449,8 @@ bot.command("delegate", async (ctx) => {
 bot.command("undelegate", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1089,7 +1461,7 @@ bot.command("undelegate", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Undelegating…");
 
@@ -1110,8 +1482,8 @@ bot.command("undelegate", async (ctx) => {
 bot.command("challenge", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1131,7 +1503,7 @@ bot.command("challenge", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Challenging…");
 
@@ -1150,14 +1522,114 @@ bot.command("challenge", async (ctx) => {
 });
 
 /*//////////////////////////////////////////////////////////////
+                    /support, /withdrawsupport
+//////////////////////////////////////////////////////////////*/
+
+bot.command("support", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  const adapter = getAdapter(model);
+  if (typeof adapter.support !== "function") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no continuous support to back - use /vote instead.`);
+    return;
+  }
+
+  const id = ctx.match?.trim();
+  if (!id || !/^\d+$/.test(id)) {
+    await ctx.reply(
+      "Usage: `/support <id>` — backs a proposal with your entire staked balance. Replaces whatever you were previously supporting, if anything.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Backing this proposal…");
+
+  try {
+    await ensureGasFunded(account);
+    await adapter.support(client, address, id);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Now backing proposal #${id} with your full staked balance.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't back that proposal: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("withdrawsupport", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  const adapter = getAdapter(model);
+  if (typeof adapter.withdrawSupport !== "function") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no continuous support to withdraw.`);
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Withdrawing your support…");
+
+  try {
+    await ensureGasFunded(account);
+    await adapter.withdrawSupport(client, address);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Support withdrawn. Your staked tokens are unlocked.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't withdraw support: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("mysupport", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  const adapter = getAdapter(model);
+  if (typeof adapter.getCurrentSupport !== "function") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no continuous support to check.`);
+    return;
+  }
+
+  try {
+    const userAddress = await getUserAddress(ctx.from.id);
+    const proposalId = await adapter.getCurrentSupport(address, userAddress);
+    if (proposalId === 0n) {
+      await ctx.reply("You're not currently backing any proposal.");
+    } else {
+      await ctx.reply(`You're currently backing proposal #${proposalId}.`);
+    }
+  } catch (err) {
+    console.error(err);
+    await ctx.reply(`Couldn't check your support: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
               /registereligible, /withdraweligibility
 //////////////////////////////////////////////////////////////*/
 
 bot.command("registereligible", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1168,7 +1640,7 @@ bot.command("registereligible", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Registering…");
 
@@ -1185,8 +1657,8 @@ bot.command("registereligible", async (ctx) => {
 bot.command("withdraweligibility", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1197,7 +1669,7 @@ bot.command("withdraweligibility", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Withdrawing from the pool…");
 
@@ -1222,8 +1694,8 @@ bot.command("withdraweligibility", async (ctx) => {
 bot.command("startsortition", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1234,7 +1706,7 @@ bot.command("startsortition", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Requesting randomness for a new sortition round…");
 
@@ -1255,8 +1727,8 @@ bot.command("startsortition", async (ctx) => {
 bot.command("finalizesortition", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1267,7 +1739,7 @@ bot.command("finalizesortition", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Drawing the new council…");
 
@@ -1318,8 +1790,8 @@ bot.command("council", async (ctx) => {
 bot.command("startelection", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1330,7 +1802,7 @@ bot.command("startelection", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Opening a new election…");
 
@@ -1351,8 +1823,8 @@ bot.command("startelection", async (ctx) => {
 bot.command("declarecandidacy", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1369,7 +1841,7 @@ bot.command("declarecandidacy", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Declaring candidacy…");
 
@@ -1386,8 +1858,8 @@ bot.command("declarecandidacy", async (ctx) => {
 bot.command("voteinelection", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1410,7 +1882,7 @@ bot.command("voteinelection", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Casting your election vote…");
 
@@ -1427,8 +1899,8 @@ bot.command("voteinelection", async (ctx) => {
 bot.command("finalizeelection", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1445,7 +1917,7 @@ bot.command("finalizeelection", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Finalizing the election…");
 
@@ -1466,8 +1938,8 @@ bot.command("finalizeelection", async (ctx) => {
 bot.command("initiaterecall", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1484,7 +1956,7 @@ bot.command("initiaterecall", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Starting a recall vote…");
 
@@ -1506,8 +1978,8 @@ bot.command("initiaterecall", async (ctx) => {
 bot.command("voterecall", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1525,7 +1997,7 @@ bot.command("voterecall", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Casting your recall vote…");
 
@@ -1542,8 +2014,8 @@ bot.command("voterecall", async (ctx) => {
 bot.command("finalizerecall", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1560,7 +2032,7 @@ bot.command("finalizerecall", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Finalizing the recall…");
 
@@ -1584,8 +2056,8 @@ const OUTCOME_CHOICES = { success: 1, failure: 2 }; // Outcome.Unresolved (0) de
 bot.command("castapprovalvote", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1603,7 +2075,7 @@ bot.command("castapprovalvote", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Casting approval vote…");
 
@@ -1620,8 +2092,8 @@ bot.command("castapprovalvote", async (ctx) => {
 bot.command("finalizeapproval", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1638,7 +2110,7 @@ bot.command("finalizeapproval", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Finalizing approval…");
 
@@ -1655,8 +2127,8 @@ bot.command("finalizeapproval", async (ctx) => {
 bot.command("takeposition", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1677,7 +2149,7 @@ bot.command("takeposition", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Taking your position…");
 
@@ -1694,8 +2166,8 @@ bot.command("takeposition", async (ctx) => {
 bot.command("resolveviaoracle", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1712,7 +2184,7 @@ bot.command("resolveviaoracle", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Reading the oracle and resolving…");
 
@@ -1729,8 +2201,8 @@ bot.command("resolveviaoracle", async (ctx) => {
 bot.command("proposeresolution", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1751,7 +2223,7 @@ bot.command("proposeresolution", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Proposing resolution…");
 
@@ -1773,8 +2245,8 @@ bot.command("proposeresolution", async (ctx) => {
 bot.command("challengeresolution", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1794,7 +2266,7 @@ bot.command("challengeresolution", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Challenging the resolution…");
 
@@ -1815,8 +2287,8 @@ bot.command("challengeresolution", async (ctx) => {
 bot.command("finalizeunchallenged", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1833,7 +2305,7 @@ bot.command("finalizeunchallenged", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Finalizing…");
 
@@ -1850,8 +2322,8 @@ bot.command("finalizeunchallenged", async (ctx) => {
 bot.command("castadjudicationvote", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1869,7 +2341,7 @@ bot.command("castadjudicationvote", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Casting adjudication vote…");
 
@@ -1886,8 +2358,8 @@ bot.command("castadjudicationvote", async (ctx) => {
 bot.command("finalizeadjudication", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1904,7 +2376,7 @@ bot.command("finalizeadjudication", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Finalizing adjudication…");
 
@@ -1921,8 +2393,8 @@ bot.command("finalizeadjudication", async (ctx) => {
 bot.command("claimposition", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1939,7 +2411,7 @@ bot.command("claimposition", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Claiming…");
 
@@ -1960,8 +2432,8 @@ bot.command("claimposition", async (ctx) => {
 bot.command("trade", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -1996,7 +2468,7 @@ bot.command("trade", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Trading…");
 
@@ -2021,8 +2493,8 @@ bot.command("trade", async (ctx) => {
 bot.command("finalizeproposal", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -2039,7 +2511,7 @@ bot.command("finalizeproposal", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Comparing market prices and finalizing…");
 
@@ -2056,8 +2528,8 @@ bot.command("finalizeproposal", async (ctx) => {
 bot.command("reclaimliquidity", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -2074,7 +2546,7 @@ bot.command("reclaimliquidity", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Reclaiming liquidity…");
 
@@ -2091,8 +2563,8 @@ bot.command("reclaimliquidity", async (ctx) => {
 bot.command("unstake", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
-  if (!isWalletDerivationConfigured()) {
-    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
     return;
   }
 
@@ -2113,7 +2585,7 @@ bot.command("unstake", async (ctx) => {
     return;
   }
 
-  const account = deriveUserWallet(ctx.from.id);
+  const account = await getOrCreateUserAccount(ctx.from.id);
   const client = walletClientFor(account);
   const statusMsg = await ctx.reply("⏳ Unstaking — this takes a moment…");
 
@@ -2143,6 +2615,10 @@ bot.command("unstake", async (ctx) => {
 
 bot.catch((err) => {
   console.error("Unhandled bot error:", err);
+  const ctx = err.ctx;
+  if (ctx) {
+    ctx.reply(`Something went wrong: ${err.error?.message || err.message || "unknown error"}`).catch(() => {});
+  }
 });
 
 bot.start();
@@ -2165,9 +2641,12 @@ async function attemptClaim(chatId, telegramUserId) {
   const distributorAddress = getChatDistributor(chatId);
   if (!distributorAddress) return { status: "no-distributor" };
 
-  if (!isWalletDerivationConfigured()) return { status: "no-wallet" };
-
-  const account = deriveUserWallet(telegramUserId);
+  let account;
+  try {
+    account = await getOrCreateUserAccount(telegramUserId);
+  } catch (err) {
+    return { status: "no-wallet", error: err.message };
+  }
 
   const alreadyClaimed = await hasAlreadyClaimed(distributorAddress, account.address).catch(() => false);
   if (alreadyClaimed) return { status: "already-claimed" };
@@ -2208,7 +2687,7 @@ bot.command("claim", async (ctx) => {
       await ctx.reply("No welcome distribution is set up for this group.");
       break;
     case "no-wallet":
-      await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure MASTER_WALLET_SEED.");
+      await ctx.reply(result.error || "Wallets aren't set up on this bot yet - ask an admin.");
       break;
     case "already-claimed":
       await ctx.reply("You've already claimed your welcome tokens.");
@@ -2221,6 +2700,428 @@ bot.command("claim", async (ctx) => {
     case "error":
       await ctx.reply("Something went wrong sending your tokens — try again in a moment.");
       break;
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                    OPPORTUNITY MARKETS
+    Separate system, separate network (Sepolia) - see
+    src/opportunityMarket/ for the full implementation.
+//////////////////////////////////////////////////////////////*/
+
+bot.command("registermarket", async (ctx) => {
+  const address = ctx.match?.trim();
+  if (!address || !isAddress(address)) {
+    await ctx.reply("Usage: `/registermarket 0xYourMarketAddress`", { parse_mode: "Markdown" });
+    return;
+  }
+
+  try {
+    await opportunityMarket.marketContract(address);
+    await opportunityMarket.getUnderlyingDecimals(address);
+  } catch (err) {
+    await ctx.reply("Couldn't read an OpportunityMarket at that address on Sepolia. Double-check it's deployed and correct.");
+    return;
+  }
+
+  registerMarket(ctx.chat.id, address);
+  await ctx.reply(`✅ This group is now linked to the Opportunity Market at \`${short(address)}\`.`, { parse_mode: "Markdown" });
+});
+
+bot.command("unregistermarket", async (ctx) => {
+  unregisterMarket(ctx.chat.id);
+  await ctx.reply("Unlinked. Run /registermarket or /createmarket to link one again.");
+});
+
+bot.command("createmarket", async (ctx) => {
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+  const factoryAddress = process.env.OPPORTUNITY_MARKET_FACTORY_ADDRESS;
+  if (!factoryAddress) {
+    await ctx.reply("No OpportunityMarketFactory configured on this bot - ask an admin to set OPPORTUNITY_MARKET_FACTORY_ADDRESS.");
+    return;
+  }
+
+  const underlyingToken = ctx.match?.trim();
+  if (!underlyingToken || !isAddress(underlyingToken)) {
+    await ctx.reply(
+      "Usage: `/createmarket 0xUnderlyingToken` — deploys a new, independent market. You become its deployer.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Deploying a new market on Sepolia…");
+
+  try {
+    const { marketAddress } = await opportunityMarket.createMarket(client, factoryAddress, underlyingToken);
+    registerMarket(ctx.chat.id, marketAddress);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Market deployed at \`${short(marketAddress)}\` and linked to this group. You're its deployer.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't create the market: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("listopportunity", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const metadataURI = ctx.match?.trim();
+  if (!metadataURI) {
+    await ctx.reply("Usage: `/listopportunity <metadataURI>` — adds a new opportunity people can back.", { parse_mode: "Markdown" });
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Listing…");
+
+  try {
+    const { id } = await opportunityMarket.listOpportunity(client, address, metadataURI);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Opportunity #${id ?? "?"} listed.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't list: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("deposit", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const amountStr = ctx.match?.trim();
+  if (!amountStr || Number.isNaN(Number(amountStr)) || Number(amountStr) <= 0) {
+    await ctx.reply(
+      "Usage: `/deposit <amount>` — deposits the underlying token into the market. ⚠️ This initial deposit is publicly visible on-chain; only which opportunity you later back stays private.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Depositing…");
+
+  try {
+    await opportunityMarket.deposit(client, address, amountStr);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Deposited ${amountStr} tokens.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't deposit: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("back", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const [targetId, amount] = (ctx.match?.trim() ?? "").split(/\s+/);
+  if (!targetId || !/^\d+$/.test(targetId) || !amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
+    await ctx.reply(
+      "Usage: `/back <opportunityId> <amount>` — confidentially backs an opportunity. Both which one and how much stay encrypted on-chain.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Encrypting and submitting your bet — this takes a moment…");
+
+  try {
+    await opportunityBack(client, address, targetId, amount);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Bet placed confidentially.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't place that bet: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("mybalance", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Decrypting your balance — this needs a signature the first time…");
+
+  try {
+    const balance = await opportunityGetBalance(client, address);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Your confidential balance: *${balance}*`, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't read your balance: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("mybet", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const index = ctx.match?.trim();
+  if (!index || !/^\d+$/.test(index)) {
+    await ctx.reply("Usage: `/mybet <index>` — decrypts one of your own bets (0 is your first).", { parse_mode: "Markdown" });
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Decrypting…");
+
+  try {
+    const { target, amount } = await opportunityGetBet(client, address, index);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Bet #${index}: opportunity *${target}*, amount *${amount}*`, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't read that bet: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                            /allbets
+//////////////////////////////////////////////////////////////*/
+
+bot.command("allbets", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply(
+    "⏳ Decrypting every bet — this only works for the market's actual deployer, and needs a signature the first time…"
+  );
+
+  try {
+    const bets = await opportunityGetAllBets(client, address);
+    if (bets.length === 0) {
+      await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "No bets placed yet.");
+      return;
+    }
+    const lines = bets.map((b, i) => `${i + 1}. \`${short(b.bettor)}\` → opportunity *${b.target}*, amount *${b.amount}*`);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `*All bets* (${bets.length}):\n${lines.join("\n")}`, {
+      parse_mode: "Markdown",
+    });
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Couldn't read all bets (this only works if you're the market's deployer): ${err.shortMessage || err.message}`
+    );
+  }
+});
+
+bot.command("fundrewardpool", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const amountStr = ctx.match?.trim();
+  if (!amountStr || Number.isNaN(Number(amountStr)) || Number(amountStr) <= 0) {
+    await ctx.reply("Usage: `/fundrewardpool <amount>` — deployer-only. Funds the pool paid out to backers of the winning opportunity.", { parse_mode: "Markdown" });
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Funding the reward pool…");
+
+  try {
+    await opportunityMarket.fundRewardPool(client, address, amountStr);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Reward pool funded with ${amountStr} tokens.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't fund the pool: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("cancelmarket", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Cancelling the market — deployer-only…");
+
+  try {
+    await opportunityMarket.cancelMarket(client, address);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Market cancelled. Backers can reclaim their stakes.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't cancel: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("resolve", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const winningId = ctx.match?.trim();
+  if (!winningId || !/^\d+$/.test(winningId)) {
+    await ctx.reply("Usage: `/resolve <winningOpportunityId>` — deployer-only. Declares which opportunity turned out real.", { parse_mode: "Markdown" });
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Resolving — deployer-only…");
+
+  try {
+    await opportunityMarket.resolve(client, address, winningId);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Market resolved. Winning opportunity: #${winningId}.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't resolve: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("reclaimstake", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Reclaiming your stake…");
+
+  try {
+    await opportunityMarket.reclaimStake(client, address);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Stake reclaimed.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't reclaim: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("computereward", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Computing your reward…");
+
+  try {
+    await opportunityMarket.computeReward(client, address);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Reward computed. Use /withdrawreward to collect it.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't compute reward: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("revealwinningtotal", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Revealing the aggregate winning total — this takes a moment…");
+
+  try {
+    await revealAndCompleteWinningTotal(client, address);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Winning total revealed. Backers can now /computereward.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't reveal: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("withdraw", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Withdrawing your stake — this takes a moment…");
+
+  try {
+    await revealAndCompleteWithdrawal(client, address, "stake");
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Stake withdrawn.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't withdraw: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("withdrawreward", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Withdrawing your reward — this takes a moment…");
+
+  try {
+    await revealAndCompleteWithdrawal(client, address, "reward");
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Reward withdrawn.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't withdraw: ${err.shortMessage || err.message}`);
   }
 });
 

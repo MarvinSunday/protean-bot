@@ -70,3 +70,31 @@ export function unregisterChat(chatId) {
   delete db[chatId];
   writeDb(db);
 }
+
+/**
+ * Link a chat to a deployed OpportunityMarket - orthogonal to DAO
+ * registration above, not a replacement for it. A chat can have both a
+ * governance DAO and an opportunity market linked at once; these are
+ * two genuinely separate systems (different network, no shared state),
+ * so they get their own field rather than overloading governanceAddress.
+ */
+export function registerMarket(chatId, marketAddress) {
+  const db = readDb();
+  db[chatId] = { ...db[chatId], marketAddress, marketRegisteredAt: Date.now() };
+  writeDb(db);
+}
+
+/** Get the OpportunityMarket address linked to a chat, or null if unregistered. */
+export function getChatMarket(chatId) {
+  const db = readDb();
+  return db[chatId]?.marketAddress ?? null;
+}
+
+export function unregisterMarket(chatId) {
+  const db = readDb();
+  if (db[chatId]) {
+    delete db[chatId].marketAddress;
+    delete db[chatId].marketRegisteredAt;
+    writeDb(db);
+  }
+}

@@ -142,3 +142,56 @@ export async function getBet(client, marketAddress, betIndex) {
     amount: results[amountHandle],
   };
 }
+
+/**
+ * Decrypts every bet in the market at once - deployer-only in practice,
+ * though not enforced by this function itself. Confirmed directly from
+ * source: back() explicitly grants the deployer ACL permission on every
+ * bet's target and amount (FHE.allow(target, deployer) /
+ * FHE.allow(actualAmount, deployer)) - meaning this is genuinely the
+ * SAME userDecrypt flow as getBalance()/getBet() above, just batching
+ * many handles into one call, not a fundamentally different problem the
+ * per-user authorization model can't handle. If called by anyone other
+ * than the actual deployer, the underlying userDecrypt call will fail
+ * or return unusable results for these handles, since the ACL never
+ * granted that caller permission on them - the contract's own access
+ * control is what enforces this, not a check here.
+ */
+export async function getAllBets(client, marketAddress) {
+  const userAddress = client.account.address;
+  const gov = marketContract(marketAddress);
+
+  const betsResult = await opportunityPublicClient.readContract({
+    ...gov,
+    functionName: "getAllBets",
+    args: [],
+  });
+  const [bettors, targetHandles, amountHandles] = betsResult;
+
+  if (bettors.length === 0) return [];
+
+  const instance = await getFhevmInstance();
+  const session = await getOrCreateDecryptSession(client, marketAddress);
+
+  const handleContractPairs = [
+    ...targetHandles.map((handle) => ({ handle, contractAddress: marketAddress })),
+    ...amountHandles.map((handle) => ({ handle, contractAddress: marketAddress })),
+  ];
+
+  const results = await instance.userDecrypt(
+    handleContractPairs,
+    session.privateKey,
+    session.publicKey,
+    session.signature,
+    [marketAddress],
+    userAddress,
+    session.startTimestamp,
+    session.durationDays
+  );
+
+  return bettors.map((bettor, i) => ({
+    bettor,
+    target: results[targetHandles[i]],
+    amount: results[amountHandles[i]],
+  }));
+}
