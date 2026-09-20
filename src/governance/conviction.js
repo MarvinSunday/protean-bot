@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +12,7 @@ function loadAbi(name) {
 }
 
 const abi = loadAbi("ConvictionGovernance");
+const factoryAbi = loadAbi("ConvictionDAOFactory");
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -180,4 +181,43 @@ export async function withdrawSupport(client, governanceAddress) {
 export async function getCurrentSupport(governanceAddress, account) {
   const gov = contractFor(governanceAddress);
   return publicClient.readContract({ ...gov, functionName: "currentSupportProposal", args: [getAddress(account)] });
+}
+
+// Same defaults as script/CreateConvictionDAO.s.sol, kept in sync deliberately.
+const DEFAULT_CONFIG = {
+  convictionGrowthRate: 10n ** 15n,
+  minThresholdConviction: 100n * 10n ** 18n,
+  thresholdMultiplier: 10n,
+  proposalThreshold: 0n,
+  timelockDelay: 60n * 60n * 24n,
+  executionPeriod: 60n * 60n * 24n * 7n,
+};
+
+/** Creates a Conviction-governed DAO via the factory, using the bot's operator wallet. */
+export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole) {
+  if (!walletClient || !operatorAccount) {
+    throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
+  }
+  const factoryAddress = FACTORY_ADDRESSES.conviction;
+  if (!factoryAddress) {
+    throw new Error("CONVICTION_FACTORY_ADDRESS is not configured on this bot instance");
+  }
+
+  const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
+
+  const hash = await walletClient.writeContract({
+    ...factory,
+    functionName: "createDAO",
+    args: [name, symbol, parseEther(String(initialSupplyWhole)), parseEther(String(maxSupplyWhole)), DEFAULT_CONFIG],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const daoCount = await publicClient.readContract({ ...factory, functionName: "daoCount" });
+  const [, , governanceToken, underlyingToken, governance, treasury] = await publicClient.readContract({
+    ...factory,
+    functionName: "daos",
+    args: [daoCount],
+  });
+
+  return { hash, governance, governanceToken, underlyingToken, treasury };
 }

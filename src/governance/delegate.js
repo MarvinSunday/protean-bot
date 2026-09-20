@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +12,7 @@ function loadAbi(name) {
 }
 
 const abi = loadAbi("DelegateGovernance");
+const factoryAbi = loadAbi("DelegateDAOFactory");
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -242,4 +243,76 @@ export async function getRecall(governanceAddress, recallId) {
 export async function getCouncil(governanceAddress) {
   const gov = contractFor(governanceAddress);
   return publicClient.readContract({ ...gov, functionName: "getCouncil", args: [] });
+}
+
+// Same defaults as script/CreateDelegateDAO.s.sol, kept in sync
+// deliberately. councilSize is NOT here - it's derived automatically
+// from initialCouncil's length below, same reasoning as the Solidity
+// script: a separately-entered number could drift out of sync with the
+// actual list, so there's nothing to keep in sync by construction.
+const DEFAULT_CONFIG_WITHOUT_COUNCIL_SIZE = {
+  termLength: 60n * 60n * 24n * 30n,
+  candidacyThreshold: 0n,
+  candidacyPeriod: 50_400,
+  electionVotingPeriod: 50_400,
+  councilApprovalThresholdBps: 6_000,
+  votingDelay: 1,
+  votingPeriod: 50_400,
+  timelockDelay: 60n * 60n * 24n,
+  executionPeriod: 60n * 60n * 24n * 7n,
+  recallQuorumBps: 1_000,
+  recallApprovalThresholdBps: 6_000,
+  recallVotingPeriod: 50_400,
+};
+
+/**
+ * Creates a Delegate-governed DAO via the factory, using the bot's
+ * operator wallet. `initialCouncil` is required - there's no sensible
+ * default for who the starting council actually is. councilSize and
+ * councilQuorum (majority, rounded up) are both derived from its length
+ * automatically, matching CreateDelegateDAO.s.sol's own approach.
+ */
+export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole, initialCouncil) {
+  if (!walletClient || !operatorAccount) {
+    throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
+  }
+  const factoryAddress = FACTORY_ADDRESSES.delegate;
+  if (!factoryAddress) {
+    throw new Error("DELEGATE_FACTORY_ADDRESS is not configured on this bot instance");
+  }
+  if (!initialCouncil || initialCouncil.length === 0) {
+    throw new Error("initialCouncil is required - at least one address must be supplied");
+  }
+
+  const councilSize = initialCouncil.length;
+  const config = {
+    ...DEFAULT_CONFIG_WITHOUT_COUNCIL_SIZE,
+    councilSize,
+    councilQuorum: Math.ceil((councilSize + 1) / 2),
+  };
+
+  const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
+
+  const hash = await walletClient.writeContract({
+    ...factory,
+    functionName: "createDAO",
+    args: [
+      name,
+      symbol,
+      parseEther(String(initialSupplyWhole)),
+      parseEther(String(maxSupplyWhole)),
+      config,
+      initialCouncil.map(getAddress),
+    ],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const daoCount = await publicClient.readContract({ ...factory, functionName: "daoCount" });
+  const [, , governanceToken, underlyingToken, governance, treasury] = await publicClient.readContract({
+    ...factory,
+    functionName: "daos",
+    args: [daoCount],
+  });
+
+  return { hash, governance, governanceToken, underlyingToken, treasury };
 }

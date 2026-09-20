@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +12,7 @@ function loadAbi(name) {
 }
 
 const abi = loadAbi("OptimisticGovernance");
+const factoryAbi = loadAbi("OptimisticDAOFactory");
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -181,4 +182,48 @@ export async function challenge(client, governanceAddress, proposalId) {
   const hash = await client.writeContract({ ...gov, functionName: "challenge", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
+}
+
+// Same defaults as script/CreateOptimisticDAO.s.sol, kept in sync
+// deliberately. Note this config genuinely has no votingDelay at all -
+// confirmed from the real struct - challengePeriod/challengeBond take
+// its place conceptually.
+const DEFAULT_CONFIG = {
+  challengePeriod: 50_400,
+  challengeBond: 100n * 10n ** 18n,
+  quorumBps: 1_000,
+  approvalThresholdBps: 6_000,
+  votingPeriod: 50_400,
+  timelockDelay: 60n * 60n * 24n,
+  executionPeriod: 60n * 60n * 24n * 7n,
+  proposalThreshold: 0n,
+};
+
+/** Creates an Optimistic-governed DAO via the factory, using the bot's operator wallet. */
+export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole) {
+  if (!walletClient || !operatorAccount) {
+    throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
+  }
+  const factoryAddress = FACTORY_ADDRESSES.optimistic;
+  if (!factoryAddress) {
+    throw new Error("OPTIMISTIC_FACTORY_ADDRESS is not configured on this bot instance");
+  }
+
+  const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
+
+  const hash = await walletClient.writeContract({
+    ...factory,
+    functionName: "createDAO",
+    args: [name, symbol, parseEther(String(initialSupplyWhole)), parseEther(String(maxSupplyWhole)), DEFAULT_CONFIG],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const daoCount = await publicClient.readContract({ ...factory, functionName: "daoCount" });
+  const [, , governanceToken, underlyingToken, governance, treasury] = await publicClient.readContract({
+    ...factory,
+    functionName: "daos",
+    args: [daoCount],
+  });
+
+  return { hash, governance, governanceToken, underlyingToken, treasury };
 }

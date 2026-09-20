@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +12,7 @@ function loadAbi(name) {
 }
 
 const abi = loadAbi("BoardGovernance");
+const factoryAbi = loadAbi("BoardDAOFactory");
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -185,4 +186,58 @@ export async function getDaoInfo(governanceAddress) {
     publicClient.readContract({ ...gov, functionName: "config" }),
   ]);
   return { daoName, treasuryAddress, config };
+}
+
+// Same defaults as script/CreateBoardDAO.s.sol, kept in sync
+// deliberately - only timelockDelay/executionPeriod are fixed defaults;
+// requiredApprovals is derived from initialSigners' length below, same
+// majority-rounded-up approach as delegate.js's councilQuorum.
+const DEFAULT_CONFIG_WITHOUT_REQUIRED_APPROVALS = {
+  timelockDelay: 60n * 60n * 24n,
+  executionPeriod: 60n * 60n * 24n * 7n,
+};
+
+/**
+ * Creates a Board-governed DAO via the factory, using the bot's
+ * operator wallet. Genuinely different signature from every other
+ * createDAO in this system - confirmed from the real factory ABI: no
+ * symbol/initialSupply/maxSupply at all, since Board has no token
+ * concept whatsoever. `initialSigners` is required - no sensible
+ * default for who the signers actually are. Returns governanceToken/
+ * underlyingToken as the zero address, matching what the factory
+ * itself records for this tokenless model - callers should check
+ * hasToken(model) before displaying these, same as everywhere else.
+ */
+export async function createDAO(name, initialSigners) {
+  if (!walletClient || !operatorAccount) {
+    throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
+  }
+  const factoryAddress = FACTORY_ADDRESSES.board;
+  if (!factoryAddress) {
+    throw new Error("BOARD_FACTORY_ADDRESS is not configured on this bot instance");
+  }
+  if (!initialSigners || initialSigners.length === 0) {
+    throw new Error("initialSigners is required - at least one address must be supplied");
+  }
+
+  const requiredApprovals = Math.ceil((initialSigners.length + 1) / 2);
+  const config = { ...DEFAULT_CONFIG_WITHOUT_REQUIRED_APPROVALS, requiredApprovals };
+
+  const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
+
+  const hash = await walletClient.writeContract({
+    ...factory,
+    functionName: "createDAO",
+    args: [name, config, initialSigners.map(getAddress)],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const daoCount = await publicClient.readContract({ ...factory, functionName: "daoCount" });
+  const [, , governanceToken, underlyingToken, governance, treasury] = await publicClient.readContract({
+    ...factory,
+    functionName: "daos",
+    args: [daoCount],
+  });
+
+  return { hash, governance, governanceToken, underlyingToken, treasury };
 }

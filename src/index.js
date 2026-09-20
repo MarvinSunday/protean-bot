@@ -24,6 +24,15 @@ import {
   formatEther,
 } from "./contracts.js";
 import { getAdapter, SUPPORTED_MODELS } from "./governance/index.js";
+import { createDAO as createQuadraticDAO } from "./governance/quadratic.js";
+import { createDAO as createLiquidDAO } from "./governance/liquid.js";
+import { createDAO as createOptimisticDAO } from "./governance/optimistic.js";
+import { createDAO as createDelegateDAO } from "./governance/delegate.js";
+import { createDAO as createBoardDAO } from "./governance/board.js";
+import { createDAO as createSortitionDAO } from "./governance/sortition.js";
+import { createDAO as createConvictionDAO } from "./governance/conviction.js";
+import { createDAO as createSowellianDAO } from "./governance/sowellian.js";
+import { createDAO as createDecisionMarketsDAO, getProposalVaults, splitTokens, mergeTokens, redeemTokens } from "./governance/decisionMarkets.js";
 import {
   stakeTokens,
   unstakeTokens,
@@ -186,8 +195,11 @@ const MODEL_HELP_BLOCKS = {
   ],
   decisionMarkets: [
     "/proposemarket `<target> <value> <data> <baseSeedAmount> <quoteSeedAmountMON> <description>` — create a proposal, seeding both markets",
+    "/split `<id> base|quote <amount>` — split real tokens into pass/fail conditional tokens, so you have something to trade",
     "/trade `<id> pass|fail base|quote <amountIn> <minAmountOut>` — back an outcome by trading",
+    "/merge `<id> base|quote <amount>` — reverse a split before resolution",
     "/finalizeproposal `<id>` — compare both markets' prices and resolve",
+    "/redeem `<id> base|quote` — after resolution, redeem your conditional tokens for real value",
     "/execute `<id>` — execute a passed proposal",
     "/cancel `<id>` — cancel your own proposal",
     "/reclaimliquidity `<id>` — recover a finalized proposal's seed liquidity",
@@ -197,7 +209,8 @@ const MODEL_HELP_BLOCKS = {
 bot.command("help", async (ctx) => {
   const lines = [
     "*Setup*",
-    "/createdao `<name> <symbol> <initialSupply> <maxSupply>` — deploy a new DAO and link it here",
+    "/createdao `<name> <symbol> <initialSupply> <maxSupply> [model]` — deploy a new DAO and link it here. Models: " + SUPPORTED_MODELS.filter((m) => m !== "board").join(", "),
+    "/createboarddao `<name> <signer1> <signer2> ...` — deploy a Board DAO (no token at all)",
     "/register `<governance_address> [model]` — link this group to an existing DAO (admin)",
     "/unregister — unlink this group (admin)",
     "/setdistributor `<address>` — link a welcome-token distributor (admin)",
@@ -264,15 +277,40 @@ bot.command("help", async (ctx) => {
                             /createdao
 //////////////////////////////////////////////////////////////*/
 
+// Models reachable through /createdao itself - Board is deliberately
+// excluded, since its real createDAO signature has no symbol/supply at
+// all and would make this command's parsing ambiguous either way - see
+// /createboarddao instead, matching the same "genuinely different shape
+// gets its own command" precedent already used for /proposecriteria and
+// /proposemarket.
+const CREATE_DAO_FUNCTIONS = {
+  tokenWeighted: (name, symbol, initialSupply, maxSupply) => createDaoOnChain(name, symbol, initialSupply, maxSupply),
+  quadratic: (name, symbol, initialSupply, maxSupply) => createQuadraticDAO(name, symbol, initialSupply, maxSupply),
+  liquid: (name, symbol, initialSupply, maxSupply) => createLiquidDAO(name, symbol, initialSupply, maxSupply),
+  optimistic: (name, symbol, initialSupply, maxSupply) => createOptimisticDAO(name, symbol, initialSupply, maxSupply),
+  conviction: (name, symbol, initialSupply, maxSupply) => createConvictionDAO(name, symbol, initialSupply, maxSupply),
+  sowellian: (name, symbol, initialSupply, maxSupply) => createSowellianDAO(name, symbol, initialSupply, maxSupply),
+  decisionMarkets: (name, symbol, initialSupply, maxSupply) => createDecisionMarketsDAO(name, symbol, initialSupply, maxSupply),
+  // These two need extra args beyond the standard four - handled explicitly below, not through this simple table.
+  delegate: (name, symbol, initialSupply, maxSupply, extra) => createDelegateDAO(name, symbol, initialSupply, maxSupply, extra.council),
+  sortition: (name, symbol, initialSupply, maxSupply, extra) =>
+    createSortitionDAO(name, symbol, initialSupply, maxSupply, extra.randomnessSource, extra.council),
+};
+
 bot.command("createdao", async (ctx) => {
   const args = ctx.match?.trim().split(/\s+/) ?? [];
 
-  if (args.length !== 4) {
+  if (args.length < 4) {
     await ctx.reply(
       [
-        "Usage: `/createdao <name> <symbol> <initialSupply> <maxSupply>`",
+        "Usage: `/createdao <name> <symbol> <initialSupply> <maxSupply> [model] [extra...]`",
         "",
         "Example: `/createdao ArkDAO ARK 1000000 10000000`",
+        "Example (quadratic): `/createdao ArkDAO ARK 1000000 10000000 quadratic`",
+        "Example (delegate, needs a starting council): `/createdao ArkDAO ARK 1000000 10000000 delegate 0xA... 0xB... 0xC...`",
+        "Example (sortition, needs a randomness source then a starting council): `/createdao ArkDAO ARK 1000000 10000000 sortition 0xRandomnessSource 0xA... 0xB... 0xC...`",
+        "",
+        `Models: ${Object.keys(CREATE_DAO_FUNCTIONS).join(", ")} (defaults to tokenWeighted). Board has no token at all - use /createboarddao instead.`,
         "",
         "⚠️ Name and symbol must be single words (no spaces) for now.",
       ].join("\n"),
@@ -281,7 +319,8 @@ bot.command("createdao", async (ctx) => {
     return;
   }
 
-  const [name, symbol, initialSupplyStr, maxSupplyStr] = args;
+  const [name, symbol, initialSupplyStr, maxSupplyStr, modelArg, ...rest] = args;
+  const model = modelArg || "tokenWeighted";
   const initialSupply = Number(initialSupplyStr);
   const maxSupply = Number(maxSupplyStr);
 
@@ -294,24 +333,54 @@ bot.command("createdao", async (ctx) => {
     return;
   }
 
+  const createFn = CREATE_DAO_FUNCTIONS[model];
+  if (!createFn) {
+    await ctx.reply(
+      model === "board"
+        ? "Board has no token at all - use `/createboarddao <name> <signer1> <signer2> ...` instead."
+        : `Unknown model "${model}". Supported: ${Object.keys(CREATE_DAO_FUNCTIONS).join(", ")}, board (via /createboarddao)`,
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  let extra = {};
+  if (model === "delegate") {
+    if (rest.length === 0 || !rest.every(isAddress)) {
+      await ctx.reply("Delegate needs a starting council: `/createdao <name> <symbol> <initialSupply> <maxSupply> delegate <address...>`", { parse_mode: "Markdown" });
+      return;
+    }
+    extra = { council: rest };
+  } else if (model === "sortition") {
+    const [randomnessSource, ...council] = rest;
+    if (!randomnessSource || !isAddress(randomnessSource) || council.length === 0 || !council.every(isAddress)) {
+      await ctx.reply(
+        "Sortition needs a randomness source then a starting council: `/createdao <name> <symbol> <initialSupply> <maxSupply> sortition <randomnessSource> <address...>`",
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+    extra = { randomnessSource, council };
+  }
+
   const statusMsg = await ctx.reply("⏳ Creating DAO on-chain — this takes a moment…");
 
   try {
-    const result = await createDaoOnChain(name, symbol, initialSupply, maxSupply);
+    const result = await createFn(name, symbol, initialSupply, maxSupply, extra);
 
     // Auto-link this chat to the new DAO, saving a manual /register step.
-    registerChat(ctx.chat.id, result.governance);
+    registerChat(ctx.chat.id, result.governance, model);
 
     const lines = [
-      `✅ *${name}* created and linked to this group.`,
+      `✅ *${name}* (${model}) created and linked to this group.`,
       "",
       `Governance: \`${short(result.governance)}\``,
-      `Token (staking wrapper): \`${short(result.governanceToken)}\``,
-      `Underlying token: \`${short(result.underlyingToken)}\``,
+      hasToken(model) ? `Token (staking wrapper): \`${short(result.governanceToken)}\`` : null,
+      hasToken(model) ? `Underlying token: \`${short(result.underlyingToken)}\`` : null,
       `Treasury: \`${short(result.treasury)}\``,
       "",
       `⚠️ The entire initial supply (${initialSupply} ${symbol}) is currently held by the bot's operator wallet, not any individual — this is a temporary shortcut until DAO creation moves to protean-connect. Someone will need to receive and distribute it manually for now.`,
-    ];
+    ].filter(Boolean);
 
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, lines.join("\n"), {
       parse_mode: "Markdown",
@@ -323,6 +392,54 @@ bot.command("createdao", async (ctx) => {
       statusMsg.message_id,
       `Couldn't create the DAO: ${err.message}`
     );
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                          /createboarddao
+//////////////////////////////////////////////////////////////*/
+
+bot.command("createboarddao", async (ctx) => {
+  const args = ctx.match?.trim().split(/\s+/) ?? [];
+
+  if (args.length < 2) {
+    await ctx.reply(
+      [
+        "Usage: `/createboarddao <name> <signer1> <signer2> ...`",
+        "",
+        "Example: `/createboarddao ArkBoard 0xAaa... 0xBbb... 0xCcc...`",
+        "",
+        "⚠️ Board has no token at all - signers approve directly. Name must be a single word for now.",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const [name, ...signers] = args;
+  if (!signers.every(isAddress)) {
+    await ctx.reply("All signer addresses must be valid.");
+    return;
+  }
+
+  const statusMsg = await ctx.reply("⏳ Creating DAO on-chain — this takes a moment…");
+
+  try {
+    const result = await createBoardDAO(name, signers);
+    registerChat(ctx.chat.id, result.governance, "board");
+
+    const lines = [
+      `✅ *${name}* (board) created and linked to this group.`,
+      "",
+      `Governance: \`${short(result.governance)}\``,
+      `Treasury: \`${short(result.treasury)}\``,
+      `Signers: ${signers.length}`,
+    ];
+
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, lines.join("\n"), { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't create the DAO: ${err.message}`);
   }
 });
 
@@ -2428,6 +2545,123 @@ bot.command("claimposition", async (ctx) => {
 /*//////////////////////////////////////////////////////////////
     DECISION MARKETS - trade, finalize, reclaim liquidity
 //////////////////////////////////////////////////////////////*/
+
+bot.command("split", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  if (model !== "decisionMarkets") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no split tokens.`);
+    return;
+  }
+
+  const [id, sideRaw, amount] = (ctx.match?.trim() ?? "").split(/\s+/);
+  const side = sideRaw?.toLowerCase();
+  if (!id || !/^\d+$/.test(id) || (side !== "base" && side !== "quote") || !amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
+    await ctx.reply(
+      "Usage: `/split <id> base|quote <amount>` — splits real tokens into an equal amount of pass and fail conditional tokens, so you have something to /trade. `base` = the DAO token side, `quote` = the MON/WMON side.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Splitting…");
+
+  try {
+    await ensureGasFunded(account);
+    const { baseVault, quoteVault } = await getProposalVaults(address, id);
+    await splitTokens(client, side === "base" ? baseVault : quoteVault, amount);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Split ${amount} tokens into pass/fail conditional tokens on the ${side} side.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't split: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("merge", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  if (model !== "decisionMarkets") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no conditional tokens to merge.`);
+    return;
+  }
+
+  const [id, sideRaw, amount] = (ctx.match?.trim() ?? "").split(/\s+/);
+  const side = sideRaw?.toLowerCase();
+  if (!id || !/^\d+$/.test(id) || (side !== "base" && side !== "quote") || !amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
+    await ctx.reply(
+      "Usage: `/merge <id> base|quote <amount>` — reverses a split before resolution, returning your real tokens. Only works before /finalizeproposal has resolved this proposal.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Merging…");
+
+  try {
+    await ensureGasFunded(account);
+    const { baseVault, quoteVault } = await getProposalVaults(address, id);
+    await mergeTokens(client, side === "base" ? baseVault : quoteVault, amount);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Merged ${amount} conditional tokens back into real tokens on the ${side} side.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't merge: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("redeem", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  if (model !== "decisionMarkets") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no conditional tokens to redeem.`);
+    return;
+  }
+
+  const [id, sideRaw] = (ctx.match?.trim() ?? "").split(/\s+/);
+  const side = sideRaw?.toLowerCase();
+  if (!id || !/^\d+$/.test(id) || (side !== "base" && side !== "quote")) {
+    await ctx.reply(
+      "Usage: `/redeem <id> base|quote` — redeems your entire conditional token balance for real tokens, weighted by the resolved outcome. Only works after /finalizeproposal has resolved this proposal.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Redeeming…");
+
+  try {
+    await ensureGasFunded(account);
+    const { baseVault, quoteVault } = await getProposalVaults(address, id);
+    await redeemTokens(client, side === "base" ? baseVault : quoteVault);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Redeemed your ${side}-side conditional tokens for real tokens.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't redeem: ${err.shortMessage || err.message}`);
+  }
+});
 
 bot.command("trade", async (ctx) => {
   const address = await requireDAO(ctx);

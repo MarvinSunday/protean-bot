@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +12,12 @@ function loadAbi(name) {
 }
 
 const abi = loadAbi("DecisionMarketsGovernance");
+const factoryAbi = loadAbi("DecisionMarketsDAOFactory");
+const vaultAbi = loadAbi("ConditionalVault");
+
+const ERC20_APPROVE_ABI = [
+  { type: "function", name: "approve", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" },
+];
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -212,4 +218,129 @@ export async function reclaimLiquidity(client, governanceAddress, proposalId) {
 export async function getWmon(governanceAddress) {
   const gov = contractFor(governanceAddress);
   return publicClient.readContract({ ...gov, functionName: "wmon", args: [] });
+}
+
+// Same defaults as script/CreateDecisionMarketsDAO.s.sol, kept in sync
+// deliberately. Note WMON and the shared clone implementations are NOT
+// part of createDAO's own arguments - the factory already fixed those
+// at ITS OWN deployment time (see DeployDecisionMarketsDAOFactory.s.sol),
+// reused automatically for every DAO it creates from here on.
+const DEFAULT_CONFIG = {
+  tradingPeriod: 60n * 60n * 24n * 3n,
+  thresholdBps: 300,
+  timelockDelay: 60n * 60n * 24n,
+  executionPeriod: 60n * 60n * 24n * 7n,
+};
+
+/** Creates a Decision-Markets-governed DAO via the factory, using the bot's operator wallet. */
+export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole) {
+  if (!walletClient || !operatorAccount) {
+    throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
+  }
+  const factoryAddress = FACTORY_ADDRESSES.decisionMarkets;
+  if (!factoryAddress) {
+    throw new Error("DECISION_MARKETS_FACTORY_ADDRESS is not configured on this bot instance");
+  }
+
+  const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
+
+  const hash = await walletClient.writeContract({
+    ...factory,
+    functionName: "createDAO",
+    args: [name, symbol, parseEther(String(initialSupplyWhole)), parseEther(String(maxSupplyWhole)), DEFAULT_CONFIG],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const daoCount = await publicClient.readContract({ ...factory, functionName: "daoCount" });
+  const [, , governanceToken, underlyingToken, governance, treasury] = await publicClient.readContract({
+    ...factory,
+    functionName: "daos",
+    args: [daoCount],
+  });
+
+  return { hash, governance, governanceToken, underlyingToken, treasury };
+}
+
+/*//////////////////////////////////////////////////////////////
+    CONDITIONAL VAULT WIRING - previously missing entirely.
+    trade() alone was never sufficient: a trader needs splitTokens()
+    first to actually get conditional tokens to trade with, and
+    redeemTokens() afterward to turn winning tokens back into real
+    value - neither was wired anywhere in this adapter before, despite
+    both genuinely existing on ConditionalVault.sol. resolve() itself
+    needed no separate wiring - it's onlyOracle, called internally by
+    finalizeProposal() above, not something a user calls directly.
+//////////////////////////////////////////////////////////////*/
+
+function vaultContract(vaultAddress) {
+  return { address: getAddress(vaultAddress), abi: vaultAbi };
+}
+
+/**
+ * Resolves which vault address backs which side of a given proposal.
+ * `side`: "base" (the DAO's governance token) or "quote" (WMON) -
+ * matches trade()'s own sideIn convention (0 = Base, 1 = Quote).
+ */
+export async function getProposalVaults(governanceAddress, proposalId) {
+  const p = await getProposal(governanceAddress, proposalId);
+  return { baseVault: p.baseVault, quoteVault: p.quoteVault };
+}
+
+/**
+ * Splits `amountWhole` of the vault's real underlying token into an
+ * equal amount of both pass and fail conditional tokens - the step a
+ * trader needs before trade() has anything to actually sell. Two
+ * transactions: approve, then split, same pattern as common.js's
+ * stakeTokens. `vaultAddress` should be whichever of a proposal's
+ * baseVault/quoteVault matches the side being traded - get it from
+ * getProposalVaults() first.
+ */
+export async function splitTokens(client, vaultAddress, amountWhole) {
+  const vault = vaultContract(vaultAddress);
+  const underlyingAddress = await publicClient.readContract({ ...vault, functionName: "underlying" });
+  const amount = parseEther(String(amountWhole));
+
+  const approveHash = await client.writeContract({
+    address: underlyingAddress,
+    abi: ERC20_APPROVE_ABI,
+    functionName: "approve",
+    args: [vault.address, amount],
+  });
+  await publicClient.waitForTransactionReceipt({ hash: approveHash });
+
+  const hash = await client.writeContract({ ...vault, functionName: "splitTokens", args: [amount] });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { approveHash, hash };
+}
+
+/**
+ * Reverses a split before resolution - burns equal pass/fail tokens,
+ * returns the real underlying. Only works pre-resolution; the contract
+ * itself rejects this afterward (only one side has any value once
+ * resolved, so merging back to a matched pair no longer makes sense).
+ */
+export async function mergeTokens(client, vaultAddress, amountWhole) {
+  const vault = vaultContract(vaultAddress);
+  const hash = await client.writeContract({
+    ...vault,
+    functionName: "mergeTokens",
+    args: [parseEther(String(amountWhole))],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { hash };
+}
+
+/**
+ * Redeems the caller's ENTIRE conditional token balance in this vault
+ * for real underlying, weighted by the resolved payout - the function
+ * this whole gap was actually about. No amount parameter; the contract
+ * redeems everything the caller holds in one call, matching its real
+ * signature exactly (confirmed from source, takes no arguments at all).
+ * Only works after resolution - finalizeProposal() must have run first.
+ */
+export async function redeemTokens(client, vaultAddress) {
+  const vault = vaultContract(vaultAddress);
+  const hash = await client.writeContract({ ...vault, functionName: "redeemTokens", args: [] });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { hash };
 }

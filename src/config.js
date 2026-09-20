@@ -62,6 +62,26 @@ if (!FACTORY_ADDRESS) {
   console.warn("FACTORY_ADDRESS not set - /createdao will not work until it is.");
 }
 
+/**
+ * One factory address per model, keyed the same way SUPPORTED_MODELS
+ * names them. /createdao looks up the right one for whichever model the
+ * caller asked for; a model with no address set here simply can't be
+ * created through the bot yet (an existing DAO of that model can still
+ * be linked with /register - this only gates *creating new ones*).
+ */
+export const FACTORY_ADDRESSES = {
+  tokenWeighted: FACTORY_ADDRESS,
+  quadratic: process.env.QUADRATIC_FACTORY_ADDRESS,
+  liquid: process.env.LIQUID_FACTORY_ADDRESS,
+  optimistic: process.env.OPTIMISTIC_FACTORY_ADDRESS,
+  delegate: process.env.DELEGATE_FACTORY_ADDRESS,
+  board: process.env.BOARD_FACTORY_ADDRESS,
+  sortition: process.env.SORTITION_FACTORY_ADDRESS,
+  conviction: process.env.CONVICTION_FACTORY_ADDRESS,
+  sowellian: process.env.SOWELLIAN_FACTORY_ADDRESS,
+  decisionMarkets: process.env.DECISION_MARKETS_FACTORY_ADDRESS,
+};
+
 if (!BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN - copy .env.example to .env and fill it in.");
   process.exit(1);

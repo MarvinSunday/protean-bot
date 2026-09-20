@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +12,7 @@ function loadAbi(name) {
 }
 
 const abi = loadAbi("SortitionGovernance");
+const factoryAbi = loadAbi("SortitionDAOFactory");
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -204,4 +205,76 @@ export async function getCouncil(governanceAddress) {
 export async function getEligiblePool(governanceAddress) {
   const gov = contractFor(governanceAddress);
   return publicClient.readContract({ ...gov, functionName: "getEligiblePool", args: [] });
+}
+
+// Same defaults as script/CreateSortitionDAO.s.sol, kept in sync
+// deliberately. councilSize derived from initialCouncil's length, same
+// reasoning as delegate.js's createDAO.
+const DEFAULT_CONFIG_WITHOUT_COUNCIL_SIZE = {
+  termLength: 60n * 60n * 24n * 30n,
+  eligibilityThreshold: 0n,
+  councilApprovalThresholdBps: 6_000,
+  votingDelay: 1,
+  votingPeriod: 50_400,
+  timelockDelay: 60n * 60n * 24n,
+  executionPeriod: 60n * 60n * 24n * 7n,
+};
+
+/**
+ * Creates a Sortition-governed DAO via the factory, using the bot's
+ * operator wallet. Both `randomnessSource` and `initialCouncil` are
+ * required, with no sensible default for either - randomnessSource must
+ * be a real, already-deployed IRandomnessSource genuinely configured
+ * for this chain (deliberately never guessed at, same reasoning as
+ * SortitionDAOFactory.sol itself), and initialCouncil is the starting/
+ * bootstrap council (councilSize/councilQuorum derived from its length),
+ * not something with a meaningful default membership.
+ */
+export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole, randomnessSource, initialCouncil) {
+  if (!walletClient || !operatorAccount) {
+    throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
+  }
+  const factoryAddress = FACTORY_ADDRESSES.sortition;
+  if (!factoryAddress) {
+    throw new Error("SORTITION_FACTORY_ADDRESS is not configured on this bot instance");
+  }
+  if (!randomnessSource) {
+    throw new Error("randomnessSource is required - a real, already-deployed IRandomnessSource address");
+  }
+  if (!initialCouncil || initialCouncil.length === 0) {
+    throw new Error("initialCouncil is required - at least one address must be supplied");
+  }
+
+  const councilSize = initialCouncil.length;
+  const config = {
+    ...DEFAULT_CONFIG_WITHOUT_COUNCIL_SIZE,
+    councilSize,
+    councilQuorum: Math.ceil((councilSize + 1) / 2),
+  };
+
+  const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
+
+  const hash = await walletClient.writeContract({
+    ...factory,
+    functionName: "createDAO",
+    args: [
+      name,
+      symbol,
+      parseEther(String(initialSupplyWhole)),
+      parseEther(String(maxSupplyWhole)),
+      getAddress(randomnessSource),
+      config,
+      initialCouncil.map(getAddress),
+    ],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const daoCount = await publicClient.readContract({ ...factory, functionName: "daoCount" });
+  const [, , governanceToken, underlyingToken, governance, treasury] = await publicClient.readContract({
+    ...factory,
+    functionName: "daos",
+    args: [daoCount],
+  });
+
+  return { hash, governance, governanceToken, underlyingToken, treasury };
 }

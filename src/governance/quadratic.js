@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -12,6 +12,7 @@ function loadAbi(name) {
 }
 
 const abi = loadAbi("QuadraticGovernance");
+const factoryAbi = loadAbi("QuadraticDAOFactory");
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -147,4 +148,53 @@ export async function getProposal(governanceAddress, proposalId) {
 export async function previewWeight(governanceAddress, balance) {
   const gov = contractFor(governanceAddress);
   return publicClient.readContract({ ...gov, functionName: "previewWeight", args: [balance] });
+}
+
+// Same defaults as script/CreateQuadraticDAO.s.sol, kept in sync
+// deliberately - see that script if you want to understand what each
+// field means.
+const DEFAULT_CONFIG = {
+  quorumBps: 1_000,
+  approvalThresholdBps: 6_000,
+  votingDelay: 1,
+  votingPeriod: 50_400,
+  timelockDelay: 60n * 60n * 24n,
+  executionPeriod: 60n * 60n * 24n * 7n,
+  proposalThreshold: 0n,
+};
+
+/**
+ * Creates a Quadratic-governed DAO via the factory, using the bot's
+ * operator wallet - same convention as contracts.js's createDaoOnChain
+ * for the original model. Reads the new DAO's address back via the
+ * factory's own daoCount()/daos() registry afterward, same pattern
+ * every factory in this system shares (confirmed - all ten use the
+ * identical DAOInfo struct).
+ */
+export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole) {
+  if (!walletClient || !operatorAccount) {
+    throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
+  }
+  const factoryAddress = FACTORY_ADDRESSES.quadratic;
+  if (!factoryAddress) {
+    throw new Error("QUADRATIC_FACTORY_ADDRESS is not configured on this bot instance");
+  }
+
+  const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
+
+  const hash = await walletClient.writeContract({
+    ...factory,
+    functionName: "createDAO",
+    args: [name, symbol, parseEther(String(initialSupplyWhole)), parseEther(String(maxSupplyWhole)), DEFAULT_CONFIG],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  const daoCount = await publicClient.readContract({ ...factory, functionName: "daoCount" });
+  const [, , governanceToken, underlyingToken, governance, treasury] = await publicClient.readContract({
+    ...factory,
+    functionName: "daos",
+    args: [daoCount],
+  });
+
+  return { hash, governance, governanceToken, underlyingToken, treasury };
 }
