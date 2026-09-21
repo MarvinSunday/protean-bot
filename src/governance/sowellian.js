@@ -1,7 +1,7 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { getAddress, parseEther } from "viem";
+import { getAddress, parseEther, zeroHash } from "viem";
 import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -13,6 +13,7 @@ function loadAbi(name) {
 
 const abi = loadAbi("SowellianGovernance");
 const factoryAbi = loadAbi("SowellianDAOFactory");
+const { abi: chainlinkAdapterAbi, bytecode: chainlinkAdapterBytecode } = loadAbi("ChainlinkPriceFeedAdapter");
 
 function contractFor(address) {
   return { address: getAddress(address), abi };
@@ -165,6 +166,7 @@ export async function proposeWithCriteria(
   metadataURI,
   resolutionMethod,
   oracle,
+  oracleSelector,
   targetValue,
   targetIsMinimum,
   measurementPeriod
@@ -179,6 +181,7 @@ export async function proposeWithCriteria(
       metadataURI,
       resolutionMethod,
       getAddress(oracle ?? "0x0000000000000000000000000000000000000000"),
+      oracleSelector ?? zeroHash,
       BigInt(targetValue),
       Boolean(targetIsMinimum),
       BigInt(measurementPeriod),
@@ -361,4 +364,29 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
   });
 
   return { hash, governance, governanceToken, underlyingToken, treasury };
+}
+
+/**
+ * Deploys a fresh ChainlinkPriceFeedAdapter wrapping `chainlinkFeedAddress`
+ * - the on-demand version of the manual `forge create` flow, so a DAO
+ * member can get a usable oracle address without CLI access. Unlike
+ * SwitchboardPriceFeedAdapter (one reusable deployment, feed chosen
+ * per-proposal), Chainlink genuinely needs a fresh adapter per distinct
+ * feed - see the adapter's own contract-level comment for why this
+ * isn't a limitation of the adapter, but of how Chainlink itself works
+ * (each price pair is already its own separately-deployed contract on
+ * Chainlink's side, with no shared proxy to address feeds through).
+ *
+ * Real, verified bytecode - extracted directly from compiling
+ * ChainlinkPriceFeedAdapter.sol against the actual installed
+ * @chainlink/contracts package, not assumed or hand-written.
+ */
+export async function deployChainlinkOracle(client, chainlinkFeedAddress) {
+  const hash = await client.deployContract({
+    abi: chainlinkAdapterAbi,
+    bytecode: chainlinkAdapterBytecode,
+    args: [getAddress(chainlinkFeedAddress)],
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  return { hash, adapterAddress: receipt.contractAddress };
 }

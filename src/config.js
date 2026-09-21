@@ -82,6 +82,29 @@ export const FACTORY_ADDRESSES = {
   decisionMarkets: process.env.DECISION_MARKETS_FACTORY_ADDRESS,
 };
 
+/**
+ * The randomness source every new Sortition DAO gets wired to at
+ * creation time - a backend default rather than something each
+ * /createdao caller has to know and type correctly. Deliberately one
+ * shared value, not per-DAO: this bot only ever points at one deployed
+ * randomness adapter at a time. If a genuinely different provider is
+ * ever needed for a specific DAO, that's still possible by deploying
+ * an existing DAO's governance contract change separately - this
+ * default only affects DAOs created fresh through /createdao.
+ */
+export const SORTITION_RANDOMNESS_SOURCE = process.env.SORTITION_RANDOMNESS_SOURCE;
+
+/**
+ * The reusable Switchboard price-feed adapter every Sowellian oracle-
+ * track proposal can reference by typing "switchboard" instead of a raw
+ * address - one deployment, reused across every feed Switchboard
+ * covers, since the adapter itself takes the feedId per-call. Genuinely
+ * optional and not exclusive with Chainlink - a DAO can use both
+ * providers side by side; this just removes the need to paste this one
+ * address by hand every time.
+ */
+export const SWITCHBOARD_ORACLE_ADAPTER = process.env.SWITCHBOARD_ORACLE_ADAPTER;
+
 if (!BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN - copy .env.example to .env and fill it in.");
   process.exit(1);

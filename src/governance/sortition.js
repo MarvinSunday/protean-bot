@@ -3,8 +3,58 @@ import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
 import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
+import { CrossbarClient } from "@switchboard-xyz/common";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
+
+// Minimal ABI for the pieces of the real Switchboard contract this needs -
+// getRandomness/isRandomnessReady/settleRandomness, confirmed directly
+// against the installed @switchboard-xyz/on-demand-solidity package's own
+// ISwitchboard interface, not assumed from documentation.
+const SWITCHBOARD_ABI = [
+  {
+    type: "function",
+    name: "getRandomness",
+    inputs: [{ type: "bytes32" }],
+    outputs: [
+      {
+        type: "tuple",
+        components: [
+          { name: "randId", type: "bytes32" },
+          { name: "createdAt", type: "uint256" },
+          { name: "authority", type: "address" },
+          { name: "rollTimestamp", type: "uint256" },
+          { name: "minSettlementDelay", type: "uint64" },
+          { name: "oracle", type: "address" },
+          { name: "value", type: "uint256" },
+          { name: "settledAt", type: "uint256" },
+        ],
+      },
+    ],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "isRandomnessReady",
+    inputs: [{ type: "bytes32" }],
+    outputs: [{ type: "bool" }],
+    stateMutability: "view",
+  },
+  {
+    type: "function",
+    name: "settleRandomness",
+    inputs: [{ type: "bytes" }],
+    outputs: [],
+    stateMutability: "payable",
+  },
+];
+
+// Adapter ABI fragment needed to find the real Switchboard address behind
+// SortitionGovernance's own randomnessSource() - see the module comment on
+// settleSortitionRandomness below for why this matters.
+const ADAPTER_SWITCHBOARD_ABI = [
+  { type: "function", name: "switchboard", inputs: [], outputs: [{ type: "address" }], stateMutability: "view" },
+];
 
 function loadAbi(name) {
   const raw = fs.readFileSync(path.join(__dirname, "..", "abis", `${name}.json`), "utf8");
@@ -277,4 +327,89 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
   });
 
   return { hash, governance, governanceToken, underlyingToken, treasury };
+}
+
+/*//////////////////////////////////////////////////////////////
+    SWITCHBOARD SETTLEMENT - the keeper step nothing else in this
+    system does automatically. startSortition() requests randomness;
+    someone still has to fetch Switchboard's signed response off-
+    chain and submit it on-chain before finalizeSortition() can run.
+    Confirmed against the real, installed @switchboard-xyz/common
+    package (resolveEVMRandomness's actual signature and return
+    shape) and the real, installed @switchboard-xyz/on-demand-solidity
+    package's ISwitchboard interface - not assumed from docs alone.
+//////////////////////////////////////////////////////////////*/
+
+const crossbar = new CrossbarClient("https://crossbar.switchboard.xyz");
+
+/**
+ * Settles the current sortition round's randomness, if it's ready -
+ * the full off-chain resolve + on-chain settle round trip in one call.
+ * Anyone can call this (Switchboard's settleRandomness has no access
+ * control - it's a pull-based oracle, not a push/callback one), so
+ * `client` just needs to be able to pay gas; it doesn't need to be the
+ * DAO's own operator specifically.
+ *
+ * Returns one of:
+ * - { status: "no-pending-round" } - no sortition round has ever been started
+ * - { status: "already-settled" } - this round's randomness was already settled by someone else
+ * - { status: "not-ready", readyIn: bigint } - still inside minSettlementDelay
+ * - { status: "settled", hash } - settlement transaction succeeded
+ *
+ * Deliberately does NOT also call finalizeSortition() - settling
+ * randomness and drawing the actual council are separate concerns, and
+ * a caller may want to inspect the settled value or handle errors
+ * independently before finalizing.
+ */
+export async function settleSortitionRandomness(client, governanceAddress) {
+  const gov = contractFor(governanceAddress);
+
+  const round = await publicClient.readContract({ ...gov, functionName: "sortitionRound" });
+  if (round === 0n) return { status: "no-pending-round" };
+
+  const requestId = await publicClient.readContract({ ...gov, functionName: "requestIdOfRound", args: [round] });
+
+  const adapterAddress = await publicClient.readContract({ ...gov, functionName: "randomnessSource" });
+  const switchboardAddress = await publicClient.readContract({
+    address: adapterAddress,
+    abi: ADAPTER_SWITCHBOARD_ABI,
+    functionName: "switchboard",
+  });
+  const switchboardContract = { address: switchboardAddress, abi: SWITCHBOARD_ABI };
+
+  const randomness = await publicClient.readContract({
+    ...switchboardContract,
+    functionName: "getRandomness",
+    args: [requestId],
+  });
+  if (randomness.settledAt > 0n) return { status: "already-settled" };
+
+  const ready = await publicClient.readContract({
+    ...switchboardContract,
+    functionName: "isRandomnessReady",
+    args: [requestId],
+  });
+  if (!ready) {
+    const readyAt = randomness.rollTimestamp + randomness.minSettlementDelay;
+    const nowSeconds = BigInt(Math.floor(Date.now() / 1000));
+    return { status: "not-ready", readyIn: readyAt > nowSeconds ? readyAt - nowSeconds : 0n };
+  }
+
+  const chainId = await publicClient.getChainId();
+  const { encoded } = await crossbar.resolveEVMRandomness({
+    chainId,
+    randomnessId: requestId,
+    timestamp: Number(randomness.rollTimestamp),
+    minStalenessSeconds: Number(randomness.minSettlementDelay),
+    oracle: randomness.oracle,
+  });
+
+  const hash = await client.writeContract({
+    ...switchboardContract,
+    functionName: "settleRandomness",
+    args: [encoded],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  return { status: "settled", hash };
 }

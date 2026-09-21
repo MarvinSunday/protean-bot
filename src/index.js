@@ -1,6 +1,6 @@
 import { Bot } from "grammy";
 import { isAddress, getAddress, parseEther } from "viem";
-import { BOT_TOKEN, monadTestnet, publicClient } from "./config.js";
+import { BOT_TOKEN, monadTestnet, publicClient, SORTITION_RANDOMNESS_SOURCE, SWITCHBOARD_ORACLE_ADAPTER } from "./config.js";
 import {
   registerChat,
   getChatDAO,
@@ -29,10 +29,10 @@ import { createDAO as createLiquidDAO } from "./governance/liquid.js";
 import { createDAO as createOptimisticDAO } from "./governance/optimistic.js";
 import { createDAO as createDelegateDAO } from "./governance/delegate.js";
 import { createDAO as createBoardDAO } from "./governance/board.js";
-import { createDAO as createSortitionDAO } from "./governance/sortition.js";
+import { createDAO as createSortitionDAO, settleSortitionRandomness } from "./governance/sortition.js";
 import { createDAO as createConvictionDAO } from "./governance/conviction.js";
-import { createDAO as createSowellianDAO } from "./governance/sowellian.js";
-import { createDAO as createDecisionMarketsDAO, getProposalVaults, splitTokens, mergeTokens, redeemTokens } from "./governance/decisionMarkets.js";
+import { createDAO as createSowellianDAO, deployChainlinkOracle } from "./governance/sowellian.js";
+import { createDAO as createDecisionMarketsDAO, getProposalVaults, splitTokens, mergeTokens, redeemTokens, unwrapWmon } from "./governance/decisionMarkets.js";
 import {
   stakeTokens,
   unstakeTokens,
@@ -168,7 +168,8 @@ const MODEL_HELP_BLOCKS = {
     "/registereligible — opt into the pool for future sortition draws",
     "/withdraweligibility — opt back out",
     "/startsortition — request a random draw for a new council",
-    "/finalizesortition — draw the new council once randomness is ready",
+    "/settlesortition — settle Switchboard's randomness once ready (anyone can call this)",
+    "/finalizesortition — draw the new council once randomness is settled",
   ],
   conviction: [
     "/propose `<target> <value> <data> <description>` — create a proposal",
@@ -180,7 +181,8 @@ const MODEL_HELP_BLOCKS = {
     "/cancel `<id>` — cancel your own proposal",
   ],
   sowellian: [
-    "/proposecriteria `<target> <value> <data> <oracle|human> <oracleAddress|-> <targetValue> <min|max> <measurementPeriod> <description>` — create a proposal",
+    "/deploychainlinkoracle `<chainlinkFeedAddress>` — deploy a fresh oracle adapter for a real Chainlink Data Feed",
+    "/proposecriteria `<target> <value> <data> <oracle|human> <oracleAddress|switchboard|-> <oracleSelector|-> <targetValue> <min|max> <measurementPeriod> <description>` — create a proposal",
     "/castapprovalvote `<id> for|against|abstain` — vote on whether it opens for betting",
     "/finalizeapproval `<id>` — close the approval vote",
     "/takeposition `<id> yes|no <amount>` — back an outcome",
@@ -200,6 +202,7 @@ const MODEL_HELP_BLOCKS = {
     "/merge `<id> base|quote <amount>` — reverse a split before resolution",
     "/finalizeproposal `<id>` — compare both markets' prices and resolve",
     "/redeem `<id> base|quote` — after resolution, redeem your conditional tokens for real value",
+    "/unwrap `<amount>` — convert WMON you're holding back into native MON (optional - skip if you want to keep WMON)",
     "/execute `<id>` — execute a passed proposal",
     "/cancel `<id>` — cancel your own proposal",
     "/reclaimliquidity `<id>` — recover a finalized proposal's seed liquidity",
@@ -308,7 +311,7 @@ bot.command("createdao", async (ctx) => {
         "Example: `/createdao ArkDAO ARK 1000000 10000000`",
         "Example (quadratic): `/createdao ArkDAO ARK 1000000 10000000 quadratic`",
         "Example (delegate, needs a starting council): `/createdao ArkDAO ARK 1000000 10000000 delegate 0xA... 0xB... 0xC...`",
-        "Example (sortition, needs a randomness source then a starting council): `/createdao ArkDAO ARK 1000000 10000000 sortition 0xRandomnessSource 0xA... 0xB... 0xC...`",
+        "Example (sortition, needs a starting council - randomness source is configured by the bot admin): `/createdao ArkDAO ARK 1000000 10000000 sortition 0xA... 0xB... 0xC...`",
         "",
         `Models: ${Object.keys(CREATE_DAO_FUNCTIONS).join(", ")} (defaults to tokenWeighted). Board has no token at all - use /createboarddao instead.`,
         "",
@@ -352,15 +355,15 @@ bot.command("createdao", async (ctx) => {
     }
     extra = { council: rest };
   } else if (model === "sortition") {
-    const [randomnessSource, ...council] = rest;
-    if (!randomnessSource || !isAddress(randomnessSource) || council.length === 0 || !council.every(isAddress)) {
-      await ctx.reply(
-        "Sortition needs a randomness source then a starting council: `/createdao <name> <symbol> <initialSupply> <maxSupply> sortition <randomnessSource> <address...>`",
-        { parse_mode: "Markdown" }
-      );
+    if (!SORTITION_RANDOMNESS_SOURCE) {
+      await ctx.reply("This bot has no randomness source configured yet - ask an admin to set SORTITION_RANDOMNESS_SOURCE.");
       return;
     }
-    extra = { randomnessSource, council };
+    if (rest.length === 0 || !rest.every(isAddress)) {
+      await ctx.reply("Sortition needs a starting council: `/createdao <name> <symbol> <initialSupply> <maxSupply> sortition <address...>`", { parse_mode: "Markdown" });
+      return;
+    }
+    extra = { randomnessSource: SORTITION_RANDOMNESS_SOURCE, council: rest };
   }
 
   const statusMsg = await ctx.reply("⏳ Creating DAO on-chain — this takes a moment…");
@@ -1090,6 +1093,48 @@ bot.command("propose", async (ctx) => {
 });
 
 /*//////////////////////////////////////////////////////////////
+                      /deploychainlinkoracle
+//////////////////////////////////////////////////////////////*/
+
+bot.command("deploychainlinkoracle", async (ctx) => {
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin to configure the KMS/Supabase wallet system.");
+    return;
+  }
+
+  const feedAddress = ctx.match?.trim();
+  if (!feedAddress || !isAddress(feedAddress)) {
+    await ctx.reply(
+      [
+        "Usage: `/deploychainlinkoracle <chainlinkFeedAddress>` — deploys a fresh oracle adapter wrapping a real Chainlink Data Feed, so you can reference it in `/proposecriteria`.",
+        "",
+        "⚠️ Unlike Switchboard, Chainlink needs a genuinely new adapter for every distinct metric - confirm the feed address is real and actually exists on this chain before deploying, since a wrong address deploys successfully but fails the first time anyone tries to resolve a proposal against it.",
+      ].join("\n"),
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Deploying a new Chainlink oracle adapter…");
+
+  try {
+    await ensureGasFunded(account);
+    const { adapterAddress } = await deployChainlinkOracle(client, feedAddress);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Adapter deployed at \`${short(adapterAddress)}\`. Use this as the oracle address in /proposecriteria - pass \`-\` for its selector, since Chainlink ignores it.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't deploy the adapter: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
                           /proposecriteria
 //////////////////////////////////////////////////////////////*/
 
@@ -1107,33 +1152,50 @@ bot.command("proposecriteria", async (ctx) => {
     return;
   }
 
-  // Format: /proposecriteria <target> <value> <data> <oracle|human> <oracleAddress|-> <targetValue> <min|max> <measurementPeriodSeconds> <description...>
+  // Format: /proposecriteria <target> <value> <data> <oracle|human> <oracleAddress|switchboard|-> <oracleSelector|-> <targetValue> <min|max> <measurementPeriodSeconds> <description...>
   const raw = ctx.match?.trim() ?? "";
   const parts = raw.split(/\s+/);
-  const [target, value, data, methodRaw, oracleRaw, targetValue, directionRaw, measurementPeriod, ...descriptionParts] = parts;
+  const [target, value, data, methodRaw, oracleRawInput, selectorRaw, targetValue, directionRaw, measurementPeriod, ...descriptionParts] = parts;
   const description = descriptionParts.join(" ");
   const method = methodRaw?.toLowerCase();
   const direction = directionRaw?.toLowerCase();
 
+  let oracleRaw = oracleRawInput;
+  let switchboardShorthandError = null;
+  if (method === "oracle" && oracleRawInput?.toLowerCase() === "switchboard") {
+    if (!SWITCHBOARD_ORACLE_ADAPTER) {
+      switchboardShorthandError = "No Switchboard oracle adapter configured on this bot - ask an admin to set SWITCHBOARD_ORACLE_ADAPTER, or pass a real adapter address directly.";
+    } else {
+      oracleRaw = SWITCHBOARD_ORACLE_ADAPTER;
+    }
+  }
+
   const valid =
+    !switchboardShorthandError &&
     target && isAddress(target) && value && data &&
     (method === "oracle" || method === "human") &&
     targetValue !== undefined && !Number.isNaN(Number(targetValue)) &&
     (direction === "min" || direction === "max") &&
     measurementPeriod && /^\d+$/.test(measurementPeriod) &&
     description &&
-    (method !== "oracle" || (oracleRaw && isAddress(oracleRaw)));
+    (method !== "oracle" || (oracleRaw && isAddress(oracleRaw))) &&
+    (method !== "oracle" || selectorRaw === "-" || /^0x[0-9a-fA-F]{64}$/.test(selectorRaw));
 
   if (!valid) {
+    if (switchboardShorthandError) {
+      await ctx.reply(switchboardShorthandError);
+      return;
+    }
     await ctx.reply(
       [
-        "Usage: `/proposecriteria <target> <value> <data> <oracle|human> <oracleAddress|-> <targetValue> <min|max> <measurementPeriodSeconds> <description>`",
+        "Usage: `/proposecriteria <target> <value> <data> <oracle|human> <oracleAddress|-> <oracleSelector|-> <targetValue> <min|max> <measurementPeriodSeconds> <description>`",
         "",
-        "`oracle` needs a real deployed IMetricOracle address; for `human`, pass `-` in that slot.",
+        "`oracle` needs a real deployed IMetricOracle address, or the literal word `switchboard` (if this bot has one configured); for `human`, pass `-` in that slot.",
+        "`oracleSelector` is the specific feed to read on that oracle - a full `0x`-prefixed 32-byte value for Switchboard (its feedId), or `-` for Chainlink and human track, where it's ignored.",
         "`min` means success if the metric ends up >= targetValue; `max` means success if it ends up <= targetValue.",
         "",
         "Example (human track, resolves 7 days after execution):",
-        "`/proposecriteria 0xRecipient 0 0x human - 0 min 604800 Fund the community grant`",
+        "`/proposecriteria 0xRecipient 0 0x human - - 0 min 604800 Fund the community grant`",
       ].join("\n"),
       { parse_mode: "Markdown" }
     );
@@ -1150,6 +1212,7 @@ bot.command("proposecriteria", async (ctx) => {
     const actions = [{ target: getAddress(target), value: BigInt(value || 0), data: data || "0x" }];
     const resolutionMethod = method === "oracle" ? 0 : 1;
     const oracle = method === "oracle" ? oracleRaw : "0x0000000000000000000000000000000000000000";
+    const oracleSelector = selectorRaw === "-" || !selectorRaw ? "0x0000000000000000000000000000000000000000000000000000000000000000" : selectorRaw;
 
     const { proposalId } = await adapter.proposeWithCriteria(
       client,
@@ -1158,6 +1221,7 @@ bot.command("proposecriteria", async (ctx) => {
       description,
       resolutionMethod,
       oracle,
+      oracleSelector,
       targetValue,
       direction === "min",
       measurementPeriod
@@ -1838,6 +1902,58 @@ bot.command("startsortition", async (ctx) => {
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't start sortition: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                        /settlesortition
+//////////////////////////////////////////////////////////////*/
+
+bot.command("settlesortition", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  if (model !== "sortition") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no randomness to settle.`);
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply(
+    "⏳ Checking the current sortition round and settling with Switchboard if it's ready — this can take a moment…"
+  );
+
+  try {
+    await ensureGasFunded(account);
+    const result = await settleSortitionRandomness(client, address);
+
+    switch (result.status) {
+      case "no-pending-round":
+        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "No sortition round has been started yet — use /startsortition first.");
+        break;
+      case "already-settled":
+        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "This round's randomness is already settled. Use /finalizesortition to draw the council.");
+        break;
+      case "not-ready":
+        await ctx.api.editMessageText(
+          ctx.chat.id,
+          statusMsg.message_id,
+          `Not ready yet — Switchboard's minimum settlement delay hasn't passed. Try again in about ${result.readyIn} more second(s).`
+        );
+        break;
+      case "settled":
+        await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Randomness settled. Use /finalizesortition to draw the new council.");
+        break;
+    }
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't settle randomness: ${err.shortMessage || err.message}`);
   }
 });
 
@@ -2660,6 +2776,43 @@ bot.command("redeem", async (ctx) => {
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't redeem: ${err.shortMessage || err.message}`);
+  }
+});
+
+bot.command("unwrap", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const model = getChatModel(ctx.chat.id);
+  if (model !== "decisionMarkets") {
+    await ctx.reply(`This DAO uses ${model} governance, which has no WMON to unwrap.`);
+    return;
+  }
+
+  const amount = ctx.match?.trim();
+  if (!amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
+    await ctx.reply(
+      "Usage: `/unwrap <amount>` — converts WMON you're holding back into native MON. Only needed if you actually want native currency back; skip this if you'd rather keep holding WMON to trade or seed another proposal.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Unwrapping…");
+
+  try {
+    await ensureGasFunded(account);
+    await unwrapWmon(client, address, amount);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `✅ Unwrapped ${amount} WMON to native MON.`);
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't unwrap: ${err.shortMessage || err.message}`);
   }
 });
 
