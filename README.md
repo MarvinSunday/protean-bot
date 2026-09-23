@@ -1,183 +1,164 @@
 # Protean — DAO Governance Telegram Bot
 
-Turns a Telegram group into a fully functioning DAO. Deploy a governance
-system, get a wallet, stake, propose, and vote — all without leaving the
-chat.
+Turns a Telegram group into a fully functioning DAO. Deploy a governance system under any of ten models, get a wallet, stake, propose, vote, trade decision markets, and place confidential bets — all without leaving the chat.
+
+Contracts live in the companion repo, [`Spaces`](https://github.com/replico-labs/Spaces). See its README for deployed addresses per network.
 
 ## Status
 
-Fully write-capable. Every user gets a real, working wallet automatically
-(no external wallet app, no separate connect step), and can stake, propose,
-and vote directly from Telegram. This is a live, in-progress build — see
-[What's not fully tested yet](#whats-not-fully-tested-yet) before relying
-on it for anything real.
+Every command is wired to real, deployed contracts on Monad testnet (Opportunity Markets on Ethereum Sepolia). The contract suite passes 468/468 tests. The bot itself has been verified structurally — real ABIs, real SDK interfaces, mocked network responses — but **has not yet been run end-to-end against the live deployment through real Telegram sessions**. See [What's not fully verified yet](#whats-not-fully-verified-yet) before relying on it for anything real.
 
 ## How wallets work
 
-Every Telegram user gets a wallet **derived deterministically** from their
-Telegram ID and a single server-side secret (`MASTER_WALLET_SEED`) — the
-same user always gets the same address, computed on the spot, nothing
-stored. No OAuth flow, no third-party wallet provider, no separate app to
-visit first.
+Every Telegram user gets their own independently generated wallet, created automatically the first time they need one — no external wallet app, no connect step.
 
-This is a **custodial** model: the bot's backend can regenerate any user's
-private key at any time from that one secret. It trades some
-decentralization for zero-friction onboarding. See
-[Security](#security---read-this-before-deploying) below.
+Each private key is **envelope-encrypted with AWS KMS** (AES-256-GCM, with a per-user data key wrapped by one symmetric KMS key) and stored in Supabase. The plaintext key only exists in memory for the instant a transaction is signed. A leaked database alone reveals nothing usable; decryption requires KMS access too.
+
+This is still a **custodial** model — the bot's backend can decrypt any user's key. It trades some decentralization for zero-friction onboarding.
+
+**Legacy wallets.** Earlier versions derived every wallet from a single `MASTER_WALLET_SEED`. If a user still has funds under that old address, the bot refuses to silently create a second wallet for them and asks them to run `/migratewallet` first, which sweeps native MON across (ERC20 tokens must be moved manually — the command says so).
 
 ## Commands
 
+`/help` is model-aware: it only shows commands that apply to the governance model the current group uses.
+
 ### Setup
-- `/createdao <name> <symbol> <initialSupply> <maxSupply>` — deploys a new DAO (token, treasury, governance) and links it to this group
-- `/register <governance_address>` — link this group to an existing DAO (admin)
-- `/unregister` — unlink this group (admin)
+- `/createdao <name> <symbol> <initialSupply> <maxSupply> [model] [council...]` — deploy a DAO and link it here. Models: `tokenWeighted` (default), `quadratic`, `liquid`, `optimistic`, `delegate`, `sortition`, `conviction`, `sowellian`, `decisionMarkets`. `delegate` and `sortition` take the starting council as trailing addresses; sortition's randomness source comes from the bot's config automatically.
+- `/createboarddao <name> <signer1> <signer2> ...` — deploy a Board (multisig) DAO; no token at all
+- `/register <address> [model]` / `/unregister` — link or unlink an existing DAO (admin)
 - `/setdistributor <address>` — link a welcome-token distributor (admin)
 
 ### Wallet
-- `/wallet` — shows your wallet's full address (tap to copy)
+- `/wallet` — your wallet address
+- `/migratewallet` — move funds from a legacy derived wallet to your KMS wallet
+- `/claim` — claim welcome tokens (also automatic on join, if a distributor is linked)
 
-### DAO info (read-only)
-- `/dao` — name, token, treasury, governance config
-- `/treasury` — current treasury Chain Native Token balance
-- `/contribute` — DMs the treasury address so anyone can send funds directly
-- `/balance [address]` — staked voting power for yourself or a given address
+### DAO info
+- `/dao` — name, token, treasury, full model-specific config
+- `/treasury` · `/contribute` · `/balance [address]`
 
-### Proposals & voting
-- `/proposals` — list recent proposals with their state
-- `/proposal <id>` — full detail on one: vote tally, quorum, timing
-- `/stake <amount>` — stake tokens to activate voting power
-- `/propose <target> <value> <data> <description>` — create a proposal (advanced/low-level for now — see below)
-- `/vote <id> for|against|abstain` — cast a vote
+### Proposals (shared across models)
+- `/proposals` · `/proposal <id>` — list, or full detail rendered correctly for each model's own vote shape
+- `/propose <target> <value> <data> <description>` · `/queue <id>` · `/execute <id>` · `/cancel <id>`
+- `/vote <id> for|against|abstain [reason]`
+- `/stake <amount>` · `/unstake <amount>`
 
-### Welcome tokens
-- Automatic on join, if a distributor is linked
-- `/claim` — manual pickup, or fallback if auto-distribution missed you
+### Model-specific
+| Model | Commands |
+|---|---|
+| Board | `/confirm <id>`, `/revoke <id>` |
+| Liquid | `/delegate <address>`, `/undelegate` |
+| Optimistic | `/challenge <id>` |
+| Conviction | `/support <id>`, `/withdrawsupport`, `/mysupport` |
+| Delegate | `/startelection`, `/declarecandidacy`, `/voteinelection`, `/finalizeelection`, `/initiaterecall`, `/voterecall`, `/finalizerecall`, `/council` |
+| Sortition | `/registereligible`, `/withdraweligibility`, `/startsortition`, `/settlesortition`, `/finalizesortition`, `/council` |
+| Sowellian | `/proposecriteria`, `/deploychainlinkoracle`, `/castapprovalvote`, `/finalizeapproval`, `/takeposition`, `/resolveviaoracle`, `/proposeresolution`, `/challengeresolution`, `/finalizeunchallenged`, `/castadjudicationvote`, `/finalizeadjudication`, `/claimposition` |
+| Decision Markets | `/proposemarket`, `/split`, `/trade`, `/merge`, `/finalizeproposal`, `/redeem`, `/unwrap`, `/reclaimliquidity` |
+
+### Sowellian oracle proposals
+```
+/proposecriteria <target> <value> <data> oracle <adapter|switchboard> <feedId|-> <targetValue> min|max <measurementPeriodSeconds> <description>
+```
+- **Switchboard:** type the literal word `switchboard` (uses `SWITCHBOARD_ORACLE_ADAPTER`) and pass the real 32-byte Switchboard `feedId`. One adapter serves every feed.
+- **Chainlink:** run `/deploychainlinkoracle <chainlinkFeedAddress>` first, then pass the returned adapter address and `-` as the feed ID. Chainlink needs one adapter per feed, because each Chainlink feed is its own contract.
+- **Human track:** `human - -` in the oracle and feed slots.
+
+### Opportunity Markets (Ethereum Sepolia, FHE-encrypted)
+- `/createmarket <underlyingToken>` · `/registermarket <address>` · `/unregistermarket`
+- `/listopportunity <metadataURI>` · `/deposit <amount>` · `/back <opportunityId> <amount>` (confidential)
+- `/mybalance` · `/mybet <index>` · `/allbets` (deployer only)
+- `/fundrewardpool` · `/resolve <id>` · `/cancelmarket` (deployer only)
+- `/reclaimstake` · `/computereward` · `/revealwinningtotal` · `/withdraw` · `/withdrawreward`
 
 ## Setup
 
 ```bash
-git submodule update --init --recursive   # if cloned via the protean umbrella repo
 npm install
 cp .env.example .env
+# If using KMS wallets: run supabase/schema.sql once in your Supabase SQL editor
+npm start
 ```
-
-Fill in `.env`:
 
 | Variable | Required for | Notes |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | everything | from BotFather |
-| `RPC_URL` | everything | defaults to Chain's public RPC |
-| `FACTORY_ADDRESS` | `/createdao` | from `DeployDAOFactory.s.sol`'s output |
-| `OPERATOR_PRIVATE_KEY` | `/claim`, auto-distribution, `/createdao`, gas-funding user wallets | fund this wallet with Native Token |
-| `MASTER_WALLET_SEED` | wallets, `/stake`, `/propose`, `/vote` | **the most sensitive value in this project** — see Security |
+| `RPC_URL` | everything | Monad testnet public RPC by default |
+| `OPERATOR_PRIVATE_KEY` | `/createdao`, `/claim`, gas top-ups | a funded hot wallet — see Security |
+| `FACTORY_ADDRESS` + `<MODEL>_FACTORY_ADDRESS` | `/createdao` per model | a model with no address set can't be created, but can still be `/register`ed |
+| `SORTITION_RANDOMNESS_SOURCE` | `/createdao ... sortition` | deployed `SwitchboardRandomnessAdapter` |
+| `SWITCHBOARD_ORACLE_ADAPTER` | `switchboard` shorthand in `/proposecriteria` | deployed `SwitchboardPriceFeedAdapter` (optional) |
+| `SWITCHBOARD_ADDRESS` | the sortition keeper | Switchboard's own proxy, not our adapter |
+| `KMS_KEY_ID`, `AWS_REGION`, AWS credentials | KMS wallets | symmetric KMS key |
+| `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY` | KMS wallets | service_role key — RLS allows nothing else |
+| `MASTER_WALLET_SEED` | legacy wallets only | keep set only while old wallets still hold funds |
+| `OPPORTUNITY_MARKET_RPC_URL`, `OPPORTUNITY_MARKET_FACTORY_ADDRESS` | Opportunity Markets | Sepolia |
+
+### Running the sortition keeper
+
+`startSortition()` only *requests* randomness. Switchboard is pull-based: after the settlement delay, someone must fetch the signed result and submit it. Any user can do this manually with `/settlesortition`, or you can run the background keeper so it happens automatically:
 
 ```bash
-npm start
+npm run keeper:sortition
 ```
 
-## Security — read this before deploying anywhere real
+Run it as its own long-lived process alongside the bot (a second Railway service, pm2, systemd). It polls every 30 seconds and pays gas from the operator wallet.
 
-**`MASTER_WALLET_SEED`** can derive every user's private key, for every DAO
-this bot operates. There is no way to rotate an individual user out of a
-leak — only changing the seed, which changes *everyone's* address at once.
-Generate it with `openssl rand -hex 32`, never commit it, never log it.
+## Security — read before deploying anywhere real
 
-**`OPERATOR_PRIVATE_KEY`** pays gas for three things: `/claim`,
-`/createdao`, and automatically topping up any user wallet that's low on
-MON before their first `/stake`/`/propose`/`/vote`. Keep it funded, but
-don't over-fund it — it's a live hot wallet.
+- **Never paste private keys into chats, commands, or shell history.** Use `export PRIVATE_KEY=...` and reference `$PRIVATE_KEY`. Any key that has appeared in plaintext should be treated as burned.
+- **`OPERATOR_PRIVATE_KEY`** pays gas for `/createdao`, `/claim`, keeper settlement, and small first-transaction top-ups for user wallets. Keep it funded, but not over-funded.
+- **KMS IAM scope.** The bot's AWS credentials should only be able to `Decrypt` and `GenerateDataKey` on the one key — not manage or delete it.
+- **`SUPABASE_SERVICE_ROLE_KEY`** bypasses Row Level Security by design. Treat it like a database root password.
+- **`MASTER_WALLET_SEED`** (legacy) can derive every old wallet's key. Remove it once no old wallet holds funds.
 
-**`/createdao`'s known limitation:** the entire initial token supply mints
-to the *bot's operator wallet*, not the person who ran the command, and
-`creator` is recorded on-chain as the operator too (cosmetic only — no
-special permissions are gated behind `creator` in the contracts). This is
-a deliberate shortcut, not a bug; distributing that initial supply to the
-actual community currently requires a manual step afterward.
+## Known limitations
 
-## What's not fully tested yet
+- **`/createdao` mints the initial supply to the operator wallet**, not the person who ran the command, and records the operator as `creator` (cosmetic — no permissions are gated on it). Distributing that supply to the community is currently a manual step.
+- **`/propose` takes raw target/value/calldata** — unforgiving for non-technical users until the transaction compiler exists.
+- **Chainlink coverage is limited.** Not every metric has a Chainlink feed on every chain; Switchboard covers far more.
+- **WMON is never auto-unwrapped.** Redeeming or reclaiming on a Decision Markets quote side returns WMON; `/unwrap` converts it back to MON.
 
-Everything above has been verified as far as this development environment
-allows — every file compiles/runs, module wiring is confirmed, wallet
-derivation is confirmed deterministic and correctly signing. What **can't**
-be verified without a live deployment and real testnet funds:
+## What's not fully verified yet
 
-- An actual `/stake`, `/propose`, `/vote`, `/claim`, or `/createdao`
-  transaction landing on-chain successfully
-- The full stake → propose → vote → queue → execute loop end-to-end through
-  the bot specifically (the underlying contracts have full test coverage;
-  the bot's orchestration of them does not yet)
+Verified: every file compiles, every command calls a real exported function with the right argument shapes, contract tests pass. Not yet verified against live infrastructure:
 
-Test these yourself before trusting them for anything real — see the
-"testing checklist" discussion in project notes for a suggested order
-(`/wallet` → `/createdao` or `/register` → fund your wallet → `/stake` →
-`/propose` → `/vote`).
+- The full create → propose → vote → queue → execute loop through real Telegram sessions
+- The FHE relayer round-trip for confidential bets and decryption (Opportunity Markets)
+- Switchboard's Crossbar round-trip for sortition settlement
+- A real oracle-track Sowellian resolution
 
-## What's not built yet
+A reasonable first live test: `/wallet` → `/createdao` → `/stake` → `/propose` → `/vote` → `/queue` → `/execute`.
 
-- `/queue` and `/execute` — proposals can be created and voted on, but
-  nothing in the bot currently queues or executes a succeeded proposal
-- A guided, template-based `/propose` flow — right now it takes raw
-  target/value/calldata, which is unforgiving for non-technical users
-- Any UI for browsing/building multi-action proposals (the contracts
-  support them; the bot only exposes single-action proposals)
-- **Deploy `WelcomeDistributor` directly from the bot** — currently a
-  manual Foundry script (`DeployWelcomeDistributor.s.sol`) run outside
-  Telegram, then linked via `/setdistributor`. A `/deploydistributor`
-  command (mirroring how `/createdao` already wraps `DeployDAOFactory`)
-  would let an admin do this without leaving the chat.
-- **Tipping** — sending tokens directly between members in-chat (e.g.
-  `/tip @username 50`), separate from governance actions.
-- **A transaction compiler** — `/propose` currently requires hand-crafted
-  hex calldata, which is the single biggest usability gap in the bot right
-  now. The plan is a JSON-to-calldata converter: the user describes an
-  action in structured JSON (function name + args), and the bot compiles
-  it into the correct calldata automatically before submitting the
-  proposal — removing the need to understand ABI encoding at all.
-- **Group-wide gas sponsorship** — the bot already covers small,
-  automatic top-ups for a user's *first* transaction when their wallet is
-  low (`ensureGasFunded`, funded from `OPERATOR_PRIVATE_KEY`). The planned
-  version is more deliberate: an admin-toggleable mode where the DAO
-  sponsors gas for *every* member action in the group — proposals, votes,
-  staking — rather than relying on threshold-triggered top-ups. Likely
-  needs its own funding pool and spending limits, separate from the
-  general operator wallet, so one member's usage can't drain funds meant
-  for governance actions.
-- **Migrate off custodial derived wallets to Privy (non-custodial)** —
-  the current wallet model (`src/wallet.js`) is custodial by design: the
-  bot can regenerate any user's key from `MASTER_WALLET_SEED`. An earlier
-  attempt to use Privy's embedded wallets (genuinely non-custodial,
-  Telegram OAuth-based) hit two separate unresolved problems, not one:
-  (1) the connect site couldn't reliably read back the created wallet's
-  address from Privy's SDK response, and (2) transaction *signing* through
-  Privy was never actually built — that needs the session-key/permissions
-  layer (ERC-7715) discussed early in this project, a scoped grant letting
-  the bot request signatures without a wallet popup per action, which is
-  separate, additional work on top of just fixing address resolution. The
-  `protean-connect` project has the address-resolution debugging in
-  progress and is not currently wired into the bot. See
-  [`protean-connect/README.md`](https://github.com/MarvinSunday/protean-connect/blob/main/README.md) for the full current status and the exact
-  next step needed to unblock it.
+## Not built yet
+
+- **Transaction compiler** — structured actions (transfer, swap, approve) compiled to calldata, wrapped through `Treasury.execute()`
+- **Event listener** — proactive chat messages for on-chain events; everything today is pull-based
+- **Discord and Slack adapters**
+- **`/deploydistributor`**, in-chat tipping, and group-wide gas sponsorship with spending limits
 
 ## Architecture
 
-- `src/config.js` — The Specific chain definition, viem clients, operator wallet
-- `src/wallet.js` — deterministic per-user wallet derivation
-- `src/contracts.js` — all on-chain reads and writes (Governance, Treasury, tokens, distributor)
-- `src/db.js` — chat↔DAO and chat↔distributor link storage (flat JSON file — fine for now, not concurrency-safe, swap for a real DB before scaling)
-- `src/format.js` — chat-message formatting helpers
-- `src/index.js` — bot entrypoint, all command handlers
+```
+src/
+├── index.js              command handlers, model-aware /help
+├── config.js             chain, viem clients, operator wallet, factory + oracle addresses
+├── contracts.js          original-model reads/writes, gas top-ups
+├── db.js                 chat ↔ DAO / model / market links (flat JSON — swap before scaling)
+├── walletResolver.js     KMS-first wallet resolution, legacy migration guard
+├── kmsWallet.js          KMS envelope encryption
+├── walletStore.js        Supabase persistence for encrypted keys
+├── wallet.js             legacy seed-derived wallets
+├── governance/           one adapter per model + shared helpers (common.js, index.js registry)
+├── opportunityMarket/    Sepolia config, market actions, FHE encryption, user + public decrypt
+├── keepers/              standalone sortition randomness keeper
+└── abis/                 compiled ABIs (and adapter bytecode for on-demand deployment)
+supabase/schema.sql       wallets table, RLS enabled
+```
 
-## Deploying it somewhere persistent
+## Deploying persistently
 
-This needs to run as a long-lived process (it holds an open connection to
-Telegram, not a request/response server) — **not** compatible with
-serverless platforms like Vercel. Railway or Render work: point at this
-repo, `npm install` as the build command, `npm start` as the run command,
-set the same env vars as above in the platform's dashboard.
+The bot uses long polling, so it needs a long-lived process — not serverless. Railway or Render work: `npm install` to build, `npm start` to run, env vars set in the dashboard. Run the sortition keeper as a second service with `npm run keeper:sortition`.
 
 ## Try it live
 
-[**@proteandao_bot**](https://t.me/proteandao_bot) — assuming it's
-currently deployed and running somewhere persistent (see above), you
-should be able to message it directly and try the commands listed in this
-README yourself.
+[**@proteandao_bot**](https://t.me/proteandao_bot) — when it's deployed and running.
