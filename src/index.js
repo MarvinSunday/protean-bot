@@ -32,6 +32,7 @@ import {
   getTokenBalance,
   getTokenSymbol,
   getUnderlyingTokenAddress,
+  deployWelcomeDistributor,
 } from "./contracts.js";
 import { getAdapter, SUPPORTED_MODELS } from "./governance/index.js";
 import { createDAO as createQuadraticDAO } from "./governance/quadratic.js";
@@ -244,6 +245,7 @@ bot.command("help", async (ctx) => {
     "/createboarddao `<name> <signer1> <signer2> ...` — deploy a Board DAO (no token at all)",
     "/register `<governance_address> [model]` — link this group to an existing DAO (admin)",
     "/unregister — unlink this group (admin)",
+    "/deploywelcomedistributor `<amountPerClaim> <distributionCap>` — deploy a fresh welcome distributor for this DAO's token (creator only)",
     "/setdistributor `<address>` — link a welcome-token distributor (admin)",
     "",
     "*Your wallet*",
@@ -264,7 +266,7 @@ bot.command("help", async (ctx) => {
       "/tokenbalance `[tokenAddressOrTicker] [address|treasury]` — raw token balance. No args: your own balance of this DAO's token. Add an address to check someone else's, or `treasury` for the DAO's own holdings.",
       "/treasuryassets — every known token balance held by this DAO's treasury",
       "/registertoken `<ticker> <tokenAddress>` — let `/tip`/`/tokenbalance` use a ticker for any token (creator only)",
-      "/tip `<amount> <recipient> [tokenAddressOrTicker]` — send tokens to someone (creator only, from the operator-held supply)",
+      "/tip `<amount> <recipient> [tokenAddressOrTicker]` — send tokens to someone, from the operator-held supply (creator only). No token given: this DAO's own token. Also accepts any ticker registered with `/registertoken`.",
       "/proposals — list proposals",
       "/proposal `<id>` — full detail on one proposal"
     );
@@ -522,6 +524,64 @@ bot.command("register", async (ctx) => {
 bot.command("unregister", async (ctx) => {
   unregisterChat(ctx.chat.id);
   await ctx.reply("Unlinked. Run /register to link a DAO again.");
+});
+
+/*//////////////////////////////////////////////////////////////
+                    /deploywelcomedistributor
+//////////////////////////////////////////////////////////////*/
+
+bot.command("deploywelcomedistributor", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+
+  const model = getChatModel(ctx.chat.id);
+  if (!hasToken(model)) {
+    await ctx.reply(`This DAO uses ${model} governance, which has no token - there's nothing to distribute.`);
+    return;
+  }
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const chatCreator = getChatCreator(ctx.chat.id);
+  if (!chatCreator || String(ctx.from.id) !== chatCreator) {
+    await ctx.reply("Only this DAO's creator can deploy a welcome distributor.");
+    return;
+  }
+
+  const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+  const [amountPerClaimRaw, distributionCapRaw] = parts;
+  const amountPerClaim = Number(amountPerClaimRaw);
+  const distributionCap = Number(distributionCapRaw);
+
+  if (!amountPerClaimRaw || Number.isNaN(amountPerClaim) || amountPerClaim <= 0 || !distributionCapRaw || Number.isNaN(distributionCap) || distributionCap <= 0) {
+    await ctx.reply(
+      "Usage: `/deploywelcomedistributor <amountPerClaim> <distributionCap>`\n\nDeploys a fresh distributor for this DAO's own token - one claim per address, up to the cap. Only the DAO's creator can run this.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+  if (distributionCap < amountPerClaim) {
+    await ctx.reply("The distribution cap has to be at least as large as the amount per claim, or nobody could ever claim anything.");
+    return;
+  }
+
+  const statusMsg = await ctx.reply("⏳ Deploying a new welcome distributor…");
+
+  try {
+    const tokenAddress = await getUnderlyingTokenAddress(address);
+    const { distributorAddress } = await deployWelcomeDistributor(walletClient, tokenAddress, address, amountPerClaim, distributionCap);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Deployed at \`${short(distributorAddress)}\`.\n\nTwo steps left before it's live:\n1. Send it enough of this DAO's token to cover claims (up to ${distributionCap} total)\n2. Run \`/setdistributor ${distributorAddress}\` to link it here`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't deploy the distributor: ${err.shortMessage || err.message}`);
+  }
 });
 
 bot.command("setdistributor", async (ctx) => {
@@ -909,7 +969,7 @@ bot.command("tip", async (ctx) => {
 
   if (!amountRaw || Number.isNaN(Number(amountRaw)) || Number(amountRaw) <= 0 || !recipientRaw || !isAddress(recipientRaw)) {
     await ctx.reply(
-      "Usage: `/tip <amount> <recipientAddress> [tokenAddressOrTicker]`\n\nThe token slot is optional - it defaults to this DAO's own token. Only the DAO's creator can tip, and it sends from the tokens minted to the operator wallet when this DAO was created.",
+      "Usage: `/tip <amount> <recipientAddress> [tokenAddressOrTicker]`\n\nThe token slot is optional - it defaults to this DAO's own token, and also accepts any ticker registered with `/registertoken`. Only the DAO's creator can tip, and it sends from the tokens minted to the operator wallet when this DAO was created.",
       { parse_mode: "Markdown" }
     );
     return;

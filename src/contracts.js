@@ -21,6 +21,8 @@ const abis = {
   DAOFactory: loadAbi("DAOFactory"),
 };
 
+const welcomeDistributorArtifact = loadAbi("WelcomeDistributorArtifact");
+
 // Mirrors Types.sol's ProposalState enum exactly - order and count matter.
 export const PROPOSAL_STATE_LABELS = [
   "Pending",
@@ -427,6 +429,41 @@ export async function getTokenBalance(tokenAddress, holderAddress) {
 /** Reads a token's real on-chain symbol - for display labels, not resolution (see resolveTokenReference for that). */
 export async function getTokenSymbol(tokenAddress) {
   return publicClient.readContract({ ...underlyingToken(tokenAddress), functionName: "symbol" });
+}
+
+/**
+ * Deploys a fresh WelcomeDistributor for a DAO, closing the gap where
+ * the only way to get one live was a manual `forge script` run outside
+ * the bot entirely. `operator_` (the address WelcomeDistributor itself
+ * authorizes to call its distribute function - confirmed directly from
+ * the contract's own onlyOperator check, not assumed) is always this
+ * bot's own operator wallet, since that's who actually calls
+ * distributeWelcomeGrant elsewhere in this file - a distributor
+ * deployed with any other operator address would be permanently
+ * uncallable by this bot.
+ *
+ * Real, verified bytecode - extracted directly from compiling
+ * WelcomeDistributor.sol against the actual OpenZeppelin v5.6.1
+ * IERC20/SafeERC20 it imports, not assumed or hand-written.
+ *
+ * Deliberately does NOT fund the new distributor or call /setdistributor
+ * for the caller - those are separate, visible steps (transfer tokens to
+ * it, then /setdistributor its address) rather than silently bundled in.
+ */
+export async function deployWelcomeDistributor(client, tokenAddress, governanceAddress, amountPerClaimWhole, distributionCapWhole) {
+  const hash = await client.deployContract({
+    abi: welcomeDistributorArtifact.abi,
+    bytecode: welcomeDistributorArtifact.bytecode,
+    args: [
+      getAddress(tokenAddress),
+      getAddress(governanceAddress),
+      operatorAccount.address,
+      parseEther(String(amountPerClaimWhole)),
+      parseEther(String(distributionCapWhole)),
+    ],
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  return { hash, distributorAddress: receipt.contractAddress };
 }
 
 export { formatEther };
