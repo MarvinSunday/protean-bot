@@ -1,10 +1,14 @@
 import { Bot } from "grammy";
 import { isAddress, getAddress, parseEther } from "viem";
-import { BOT_TOKEN, monadTestnet, publicClient, SORTITION_RANDOMNESS_SOURCE, SWITCHBOARD_ORACLE_ADAPTER } from "./config.js";
+import { BOT_TOKEN, monadTestnet, publicClient, SORTITION_RANDOMNESS_SOURCE, SWITCHBOARD_ORACLE_ADAPTER, walletClient } from "./config.js";
 import {
   registerChat,
   getChatDAO,
   getChatModel,
+  getChatCreator,
+  registerToken,
+  getRegisteredToken,
+  getRegisteredTokens,
   unregisterChat,
   registerDistributor,
   getChatDistributor,
@@ -22,6 +26,12 @@ import {
   createDaoOnChain,
   ensureGasFunded,
   formatEther,
+  getDaoCreator,
+  resolveTokenReference,
+  tipTokens,
+  getTokenBalance,
+  getTokenSymbol,
+  getUnderlyingTokenAddress,
 } from "./contracts.js";
 import { getAdapter, SUPPORTED_MODELS } from "./governance/index.js";
 import { createDAO as createQuadraticDAO } from "./governance/quadratic.js";
@@ -67,6 +77,24 @@ async function requireDAO(ctx) {
     return null;
   }
   return address;
+}
+
+/**
+ * Resolves a token reference for this chat: checks the chat's own
+ * registered tickers first (registerToken/getRegisteredToken in db.js -
+ * for any token the community cares about, not just the DAO's own),
+ * then falls back to contracts.js's resolveTokenReference, which
+ * matches against the DAO's own token's real on-chain symbol(). An
+ * empty/missing reference defaults straight to the DAO's own
+ * underlying token, without touching the registry at all.
+ */
+async function resolveToken(ctx, governanceAddress, reference) {
+  if (!reference) return getUnderlyingTokenAddress(governanceAddress);
+
+  const registered = getRegisteredToken(ctx.chat.id, reference);
+  if (registered) return registered;
+
+  return resolveTokenReference(governanceAddress, reference);
 }
 
 /**
@@ -233,6 +261,10 @@ bot.command("help", async (ctx) => {
       "/treasury — current treasury balance",
       "/contribute — get the treasury address to send funds to",
       "/balance `[address]` — staked voting power (yours, or an address)",
+      "/tokenbalance `[tokenAddressOrTicker] [address|treasury]` — raw token balance. No args: your own balance of this DAO's token. Add an address to check someone else's, or `treasury` for the DAO's own holdings.",
+      "/treasuryassets — every known token balance held by this DAO's treasury",
+      "/registertoken `<ticker> <tokenAddress>` — let `/tip`/`/tokenbalance` use a ticker for any token (creator only)",
+      "/tip `<amount> <recipient> [tokenAddressOrTicker]` — send tokens to someone (creator only, from the operator-held supply)",
       "/proposals — list proposals",
       "/proposal `<id>` — full detail on one proposal"
     );
@@ -372,7 +404,7 @@ bot.command("createdao", async (ctx) => {
     const result = await createFn(name, symbol, initialSupply, maxSupply, extra);
 
     // Auto-link this chat to the new DAO, saving a manual /register step.
-    registerChat(ctx.chat.id, result.governance, model);
+    registerChat(ctx.chat.id, result.governance, model, "telegram", ctx.from.id);
 
     const lines = [
       `✅ *${name}* (${model}) created and linked to this group.`,
@@ -429,7 +461,7 @@ bot.command("createboarddao", async (ctx) => {
 
   try {
     const result = await createBoardDAO(name, signers);
-    registerChat(ctx.chat.id, result.governance, "board");
+    registerChat(ctx.chat.id, result.governance, "board", "telegram", ctx.from.id);
 
     const lines = [
       `✅ *${name}* (board) created and linked to this group.`,
@@ -851,6 +883,179 @@ bot.command("balance", async (ctx) => {
   } catch (err) {
     console.error(err);
     await ctx.reply("Couldn't read voting power for that address.");
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                              /tip
+//////////////////////////////////////////////////////////////*/
+
+bot.command("tip", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+
+  const model = getChatModel(ctx.chat.id);
+  if (!hasToken(model)) {
+    await ctx.reply(`This DAO uses ${model} governance, which has no token - there's nothing to tip.`);
+    return;
+  }
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+  const [amountRaw, recipientRaw, tokenRef] = parts;
+
+  if (!amountRaw || Number.isNaN(Number(amountRaw)) || Number(amountRaw) <= 0 || !recipientRaw || !isAddress(recipientRaw)) {
+    await ctx.reply(
+      "Usage: `/tip <amount> <recipientAddress> [tokenAddressOrTicker]`\n\nThe token slot is optional - it defaults to this DAO's own token. Only the DAO's creator can tip, and it sends from the tokens minted to the operator wallet when this DAO was created.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  try {
+    const chatCreator = getChatCreator(ctx.chat.id);
+    if (!chatCreator) {
+      await ctx.reply(
+        "This DAO's creator isn't on record - it was probably linked with /register rather than created through this bot, so /tip has no way to know who's authorized. Ask an admin to /register it again after re-checking, or use a direct on-chain transfer instead."
+      );
+      return;
+    }
+    if (String(ctx.from.id) !== chatCreator) {
+      await ctx.reply("Only this DAO's creator can use /tip.");
+      return;
+    }
+
+    const tokenAddress = await resolveToken(ctx, address, tokenRef);
+    const { hash } = await tipTokens(walletClient, tokenAddress, recipientRaw, amountRaw);
+    await ctx.reply(`✅ Tipped ${amountRaw} to \`${short(recipientRaw)}\`.\nTx: \`${short(hash)}\``, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error(err);
+    await ctx.reply(`Couldn't send that tip: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                          /tokenbalance
+//////////////////////////////////////////////////////////////*/
+
+bot.command("tokenbalance", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+
+  const model = getChatModel(ctx.chat.id);
+  if (!hasToken(model)) {
+    await ctx.reply(`This DAO uses ${model} governance, which has no token - there's no balance to check.`);
+    return;
+  }
+
+  const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+  const [tokenRef, holderRaw] = parts;
+
+  let holder = holderRaw;
+  if (holder?.toLowerCase() === "treasury") {
+    const { treasuryAddress } = await getDaoInfo(model, address);
+    holder = treasuryAddress;
+  } else if (holder && !isAddress(holder)) {
+    await ctx.reply("That doesn't look like a valid address (or the word `treasury`).", { parse_mode: "Markdown" });
+    return;
+  }
+  if (!holder) {
+    if (!isWalletStoreConfigured()) {
+      await ctx.reply(
+        "No address given, and wallets aren't set up.\nUse `/tokenbalance [tokenAddressOrTicker] 0xSomeAddress|treasury`.",
+        { parse_mode: "Markdown" }
+      );
+      return;
+    }
+    holder = await getUserAddress(ctx.from.id);
+  }
+
+  try {
+    const tokenAddress = await resolveToken(ctx, address, tokenRef);
+    const balance = await getTokenBalance(tokenAddress, holder);
+    const hint = holderRaw ? "" : "\n\n_Tip: `/tokenbalance [token] <address>` checks anyone else's, or `treasury` for the DAO's own holdings._";
+    await ctx.reply(`*${short(holder)}*\nBalance: ${balance}${hint}`, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error(err);
+    await ctx.reply(`Couldn't read that balance: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                          /registertoken
+//////////////////////////////////////////////////////////////*/
+
+bot.command("registertoken", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+
+  const chatCreator = getChatCreator(ctx.chat.id);
+  if (!chatCreator || String(ctx.from.id) !== chatCreator) {
+    await ctx.reply("Only this DAO's creator can register a token ticker.");
+    return;
+  }
+
+  const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+  const [ticker, tokenAddress] = parts;
+
+  if (!ticker || !tokenAddress || !isAddress(tokenAddress) || !/^[A-Za-z0-9]{1,15}$/.test(ticker)) {
+    await ctx.reply(
+      "Usage: `/registertoken <ticker> <tokenAddress>` — e.g. `/registertoken USDC 0x...`\n\nLets `/tip` and `/tokenbalance` accept this ticker instead of the raw address. This doesn't need to be a token this DAO issued - any real ERC20 the community wants a shortcut for.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  try {
+    const symbol = await getTokenSymbol(tokenAddress);
+    registerToken(ctx.chat.id, ticker, tokenAddress);
+    await ctx.reply(`✅ \`${ticker.toUpperCase()}\` now resolves to \`${short(tokenAddress)}\` (real on-chain symbol: ${symbol}).`, {
+      parse_mode: "Markdown",
+    });
+  } catch (err) {
+    await ctx.reply("Couldn't read that as a token - double check it's a real, deployed ERC20 address.");
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                          /treasuryassets
+//////////////////////////////////////////////////////////////*/
+
+bot.command("treasuryassets", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+
+  const model = getChatModel(ctx.chat.id);
+  if (!hasToken(model)) {
+    await ctx.reply(`This DAO uses ${model} governance, which has no token - there are no token assets to list.`);
+    return;
+  }
+
+  try {
+    const { treasuryAddress } = await getDaoInfo(model, address);
+    const ownTokenAddress = await getUnderlyingTokenAddress(address);
+    const registered = getRegisteredTokens(ctx.chat.id);
+
+    const entries = [[await getTokenSymbol(ownTokenAddress), ownTokenAddress], ...Object.entries(registered)];
+
+    const lines = await Promise.all(
+      entries.map(async ([symbol, tokenAddress]) => {
+        try {
+          const balance = await getTokenBalance(tokenAddress, treasuryAddress);
+          return `${symbol}: ${balance}`;
+        } catch {
+          return `${symbol}: couldn't read balance`;
+        }
+      })
+    );
+
+    await ctx.reply(`*Treasury assets* (\`${short(treasuryAddress)}\`)\n${lines.join("\n")}`, { parse_mode: "Markdown" });
+  } catch (err) {
+    console.error(err);
+    await ctx.reply(`Couldn't read treasury assets: ${err.shortMessage || err.message}`);
   }
 });
 

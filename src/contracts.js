@@ -1,8 +1,9 @@
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
-import { createWalletClient, http, formatEther, parseEther, getAddress } from "viem";
+import { createWalletClient, http, formatEther, parseEther, getAddress, isAddress } from "viem";
 import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESS, monadTestnet } from "./config.js";
+import { recordGasTopup, isWalletStoreConfigured } from "./walletStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -218,13 +219,25 @@ function walletClientFor(account) {
 }
 
 const MIN_GAS_BALANCE = parseEther("0.005");
-const GAS_TOPUP_AMOUNT = parseEther("0.01");
+const FIRST_GAS_TOPUP_AMOUNT = parseEther("0.1");
+const REPEAT_GAS_TOPUP_AMOUNT = parseEther("0.05");
 
 /**
- * Tops up `account` with a small amount of MON from the operator wallet if
- * its balance is below a threshold. Derived wallets start with zero MON
- * and can't pay gas for their own first transaction without this - the
- * operator wallet effectively sponsors a small amount of gas per user.
+ * Tops up `account` with MON from the operator wallet if its balance is
+ * below a threshold. Derived wallets start with zero MON and can't pay
+ * gas for their own first transaction without this - the operator
+ * wallet effectively sponsors a small amount of gas per user.
+ *
+ * Tiered for this testnet: a user's very first top-up is larger
+ * (0.1 MON) than every one after it (0.05 MON), on the assumption that
+ * the first top-up needs to cover getting properly set up, while later
+ * ones are just keeping an already-active user going. Falls back to
+ * the first-time amount, every time, for a wallet whose top-up history
+ * can't be tracked - Supabase not configured, or the address has no
+ * record there at all (a legacy derived wallet, see wallet.js) - rather
+ * than fail the whole transaction over a wallet-store lookup on what is
+ * otherwise a real transaction the user is trying to complete.
+ *
  * Silently does nothing if the account already has enough, or if no
  * operator wallet is configured (caller's own transaction will then just
  * fail with an insufficient-funds error, which is an honest failure mode).
@@ -235,9 +248,23 @@ export async function ensureGasFunded(account) {
   const balance = await publicClient.getBalance({ address: account.address });
   if (balance >= MIN_GAS_BALANCE) return;
 
+  let topupAmount = FIRST_GAS_TOPUP_AMOUNT;
+  if (isWalletStoreConfigured()) {
+    try {
+      const topupNumber = await recordGasTopup(account.address);
+      if (topupNumber !== null && topupNumber > 1) {
+        topupAmount = REPEAT_GAS_TOPUP_AMOUNT;
+      }
+    } catch (err) {
+      // Wallet-store lookup failing shouldn't block a user's real
+      // transaction - fall back to the first-time amount and continue.
+      console.error("[ensureGasFunded] Couldn't record top-up history, using first-time amount:", err.message);
+    }
+  }
+
   const hash = await walletClient.sendTransaction({
     to: account.address,
-    value: GAS_TOPUP_AMOUNT,
+    value: topupAmount,
   });
   await publicClient.waitForTransactionReceipt({ hash });
 }
@@ -318,6 +345,88 @@ export async function castVoteOnChain(account, governanceAddress, proposalId, su
   await publicClient.waitForTransactionReceipt({ hash });
 
   return { hash };
+}
+
+function stakedToken(address) {
+  return { address: getAddress(address), abi: abis.StakedGovernanceToken };
+}
+
+function underlyingToken(address) {
+  return { address: getAddress(address), abi: abis.GovernanceToken };
+}
+
+/** The DAO's registered creator address - /tip's authorization check reads this. */
+export async function getDaoCreator(governanceAddress) {
+  return publicClient.readContract({ ...governance(governanceAddress), functionName: "creator" });
+}
+
+/**
+ * Resolves the DAO's own underlying (raw, transferable) governance
+ * token address - the StakedGovernanceToken wrapper holds voting power,
+ * but tipping and everyday balances are about the underlying token
+ * itself, which is what people can actually hold, transfer, and spend.
+ */
+export async function getUnderlyingTokenAddress(governanceAddress) {
+  const stakedTokenAddress = await publicClient.readContract({ ...governance(governanceAddress), functionName: "governanceToken" });
+  return publicClient.readContract({ ...stakedToken(stakedTokenAddress), functionName: "underlying" });
+}
+
+/**
+ * Resolves a token reference to a real address - either the reference
+ * already IS a valid address (used as-is), or it's treated as a ticker
+ * and matched (case-insensitively) against the DAO's own underlying
+ * token's real, on-chain symbol(). There's no separate ticker registry:
+ * "the DAO's own token" is the only ticker this currently resolves,
+ * since it's the only token this bot has any other relationship with.
+ * Throws with a clear, specific message on no match, rather than
+ * silently falling back to something unexpected.
+ */
+export async function resolveTokenReference(governanceAddress, reference) {
+  if (isAddress(reference)) return getAddress(reference);
+
+  const underlyingAddress = await getUnderlyingTokenAddress(governanceAddress);
+  const symbol = await publicClient.readContract({ ...underlyingToken(underlyingAddress), functionName: "symbol" });
+
+  if (symbol.toLowerCase() === reference.toLowerCase()) return underlyingAddress;
+
+  throw new Error(`"${reference}" isn't a valid address and doesn't match this DAO's token symbol (${symbol})`);
+}
+
+/**
+ * Sends `amountWhole` of `tokenAddress` (the DAO's underlying token, or
+ * any other ERC20 sharing this ABI's transfer signature) from `client`
+ * to `recipientAddress`. No authorization check here - by design,
+ * matching this file's existing pattern (see castVoteOnChain,
+ * stakeTokens): callers decide who's allowed to call this and with
+ * which client; this function only executes what it's asked.
+ */
+export async function tipTokens(client, tokenAddress, recipientAddress, amountWhole) {
+  const token = underlyingToken(tokenAddress);
+  const amount = parseEther(String(amountWhole));
+
+  const hash = await client.writeContract({
+    ...token,
+    functionName: "transfer",
+    args: [getAddress(recipientAddress), amount],
+  });
+  await publicClient.waitForTransactionReceipt({ hash });
+
+  return { hash };
+}
+
+/** Raw ERC20 balanceOf on any token sharing GovernanceToken's ABI, formatted as a whole-token string. */
+export async function getTokenBalance(tokenAddress, holderAddress) {
+  const balance = await publicClient.readContract({
+    ...underlyingToken(tokenAddress),
+    functionName: "balanceOf",
+    args: [getAddress(holderAddress)],
+  });
+  return formatEther(balance);
+}
+
+/** Reads a token's real on-chain symbol - for display labels, not resolution (see resolveTokenReference for that). */
+export async function getTokenSymbol(tokenAddress) {
+  return publicClient.readContract({ ...underlyingToken(tokenAddress), functionName: "symbol" });
 }
 
 export { formatEther };

@@ -22,23 +22,92 @@ function writeDb(data) {
 }
 
 /**
- * Link a Telegram chat to a deployed governance contract, and record
- * which governance model it uses - the shared adapter registry in
+ * Composite key, matching walletStore.js's own (platform, platform_user_id)
+ * design - a bare chatId alone isn't safe once more than one platform
+ * exists, since Discord guild IDs, Slack channel IDs, and Telegram chat
+ * IDs all share the same plain-number/string namespace with nothing
+ * stopping a collision. `platform` defaults to "telegram" everywhere
+ * below, so every existing call site keeps working unchanged - only the
+ * underlying storage key actually changes.
+ */
+function key(chatId, platform) {
+  return `${platform}:${chatId}`;
+}
+
+/**
+ * Link a chat to a deployed governance contract, and record which
+ * governance model it uses - the shared adapter registry in
  * src/governance/index.js needs this to know which contract shape it's
  * actually talking to. Defaults to "tokenWeighted" for any chat that
  * doesn't specify one, matching the model every chat used before this
  * field existed.
+ *
+ * `creatorPlatformUserId` is the platform user (e.g. Telegram ID) who
+ * actually ran /createdao - deliberately NOT read from the deployed
+ * contract's own on-chain creator() field, which is always the bot's
+ * operator wallet (since the operator wallet is what signs every
+ * createDAO transaction, regardless of who typed the command). This is
+ * the bot's own, separate record of who the DAO actually belongs to
+ * from a chat-management perspective - things like /tip's authorization
+ * check need this, not the on-chain field. Leave unset (undefined) when
+ * linking an already-existing, externally-deployed DAO via /register,
+ * since the bot has no real basis for saying who "created" that one.
  */
-export function registerChat(chatId, governanceAddress, model = "tokenWeighted") {
+export function registerChat(chatId, governanceAddress, model = "tokenWeighted", platform = "telegram", creatorPlatformUserId = undefined) {
   const db = readDb();
-  db[chatId] = { ...db[chatId], governanceAddress, model, registeredAt: Date.now() };
+  const k = key(chatId, platform);
+  const creatorField = creatorPlatformUserId !== undefined
+    ? { creatorPlatformUserId: String(creatorPlatformUserId) }
+    : {};
+  db[k] = { ...db[k], governanceAddress, model, platform, ...creatorField, registeredAt: Date.now() };
   writeDb(db);
 }
 
-/** Get the Governance address linked to a chat, or null if unregistered. */
-export function getChatDAO(chatId) {
+/**
+ * The platform user ID (e.g. Telegram ID) who actually created this
+ * chat's DAO through the bot, or null if unknown - either because the
+ * DAO was linked via /register rather than created here, or because it
+ * was created before this field existed.
+ */
+export function getChatCreator(chatId, platform = "telegram") {
   const db = readDb();
-  return db[chatId]?.governanceAddress ?? null;
+  return db[key(chatId, platform)]?.creatorPlatformUserId ?? null;
+}
+
+/**
+ * Registers a ticker -> token address mapping for this chat, on top of
+ * (not replacing) the DAO's own token, which contracts.js's
+ * resolveTokenReference already resolves by reading its real, on-chain
+ * symbol(). This registry is for every OTHER token a community wants a
+ * memorable shortcut for - a treasury-held asset, a partner token,
+ * anything worth referencing without pasting a raw address each time.
+ * Ticker is stored uppercase so lookups are case-insensitive without
+ * needing to normalize at every call site.
+ */
+export function registerToken(chatId, ticker, tokenAddress, platform = "telegram") {
+  const db = readDb();
+  const k = key(chatId, platform);
+  const tokens = { ...db[k]?.tokens, [ticker.toUpperCase()]: tokenAddress };
+  db[k] = { ...db[k], tokens };
+  writeDb(db);
+}
+
+/** Looks up one registered ticker for this chat, or null if not registered. */
+export function getRegisteredToken(chatId, ticker, platform = "telegram") {
+  const db = readDb();
+  return db[key(chatId, platform)]?.tokens?.[ticker.toUpperCase()] ?? null;
+}
+
+/** Every ticker registered for this chat, as { TICKER: address } - used to list all known treasury assets at once. */
+export function getRegisteredTokens(chatId, platform = "telegram") {
+  const db = readDb();
+  return db[key(chatId, platform)]?.tokens ?? {};
+}
+
+/** Get the Governance address linked to a chat, or null if unregistered. */
+export function getChatDAO(chatId, platform = "telegram") {
+  const db = readDb();
+  return db[key(chatId, platform)]?.governanceAddress ?? null;
 }
 
 /**
@@ -47,27 +116,28 @@ export function getChatDAO(chatId) {
  * value set) - this was the only model the bot supported until now, so
  * that's the only correct default for pre-existing registrations.
  */
-export function getChatModel(chatId) {
+export function getChatModel(chatId, platform = "telegram") {
   const db = readDb();
-  return db[chatId]?.model ?? "tokenWeighted";
+  return db[key(chatId, platform)]?.model ?? "tokenWeighted";
 }
 
 /** Link a chat's WelcomeDistributor address (optional, separate from Governance). */
-export function registerDistributor(chatId, distributorAddress) {
+export function registerDistributor(chatId, distributorAddress, platform = "telegram") {
   const db = readDb();
-  db[chatId] = { ...db[chatId], distributorAddress };
+  const k = key(chatId, platform);
+  db[k] = { ...db[k], distributorAddress, platform };
   writeDb(db);
 }
 
 /** Get the WelcomeDistributor address linked to a chat, or null if unset. */
-export function getChatDistributor(chatId) {
+export function getChatDistributor(chatId, platform = "telegram") {
   const db = readDb();
-  return db[chatId]?.distributorAddress ?? null;
+  return db[key(chatId, platform)]?.distributorAddress ?? null;
 }
 
-export function unregisterChat(chatId) {
+export function unregisterChat(chatId, platform = "telegram") {
   const db = readDb();
-  delete db[chatId];
+  delete db[key(chatId, platform)];
   writeDb(db);
 }
 
@@ -78,23 +148,45 @@ export function unregisterChat(chatId) {
  * two genuinely separate systems (different network, no shared state),
  * so they get their own field rather than overloading governanceAddress.
  */
-export function registerMarket(chatId, marketAddress) {
+export function registerMarket(chatId, marketAddress, platform = "telegram") {
   const db = readDb();
-  db[chatId] = { ...db[chatId], marketAddress, marketRegisteredAt: Date.now() };
+  const k = key(chatId, platform);
+  db[k] = { ...db[k], marketAddress, marketRegisteredAt: Date.now(), platform };
   writeDb(db);
 }
 
 /** Get the OpportunityMarket address linked to a chat, or null if unregistered. */
-export function getChatMarket(chatId) {
+export function getChatMarket(chatId, platform = "telegram") {
   const db = readDb();
-  return db[chatId]?.marketAddress ?? null;
+  return db[key(chatId, platform)]?.marketAddress ?? null;
 }
 
-export function unregisterMarket(chatId) {
+export function unregisterMarket(chatId, platform = "telegram") {
   const db = readDb();
-  if (db[chatId]) {
-    delete db[chatId].marketAddress;
-    delete db[chatId].marketRegisteredAt;
+  const k = key(chatId, platform);
+  if (db[k]) {
+    delete db[k].marketAddress;
+    delete db[k].marketRegisteredAt;
     writeDb(db);
   }
+}
+
+/**
+ * Every distinct, registered governance address using a given model,
+ * deduplicated - multiple chats (on any platform) can register the same
+ * DAO, and this should only list it once. Used by the Sortition
+ * randomness keeper to know which DAOs to watch. Platform-agnostic by
+ * design - iterates every registration regardless of which platform it
+ * came from, since the keeper cares about the DAO, not which chat app
+ * registered it.
+ */
+export function getGovernanceAddressesByModel(model) {
+  const db = readDb();
+  const addresses = new Set();
+  for (const chat of Object.values(db)) {
+    if (chat.model === model && chat.governanceAddress) {
+      addresses.add(chat.governanceAddress);
+    }
+  }
+  return [...addresses];
 }

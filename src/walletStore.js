@@ -108,3 +108,44 @@ export async function getWalletAccount(platform, platformUserId) {
     authTag: record.auth_tag,
   });
 }
+
+/**
+ * Records one gas top-up for this address and returns how many top-ups
+ * it has now received, INCLUDING this one - so a return value of 1
+ * means this was its first ever. Read-then-write, not atomic: under
+ * truly concurrent top-ups for the same address this could under-count
+ * by one, meaning a later top-up gets the larger first-time amount
+ * instead of the smaller repeat one. Given how rarely the same user
+ * gets topped up twice in close succession, and that the only
+ * consequence is a slightly too-generous top-up (never too little,
+ * never a security issue), this is an acceptable tradeoff against
+ * adding a dedicated Postgres function just for this one counter.
+ *
+ * Returns null if this address has no wallet record at all - legacy
+ * derived wallets (see wallet.js) were never written to this table, so
+ * there's nowhere to persist their history. Callers should treat a null
+ * return as "no history available" and decide their own fallback,
+ * rather than this function inventing tracking for a wallet system it
+ * has no other knowledge of.
+ */
+export async function recordGasTopup(address) {
+  const client = getSupabaseClient();
+
+  const { data: existing, error: selectError } = await client
+    .from("wallets")
+    .select("gas_topups_count")
+    .eq("address", address)
+    .maybeSingle();
+
+  if (selectError) throw new Error(`Supabase lookup failed: ${selectError.message}`);
+  if (!existing) return null;
+
+  const newCount = existing.gas_topups_count + 1;
+  const { error: updateError } = await client
+    .from("wallets")
+    .update({ gas_topups_count: newCount })
+    .eq("address", address);
+
+  if (updateError) throw new Error(`Supabase update failed: ${updateError.message}`);
+  return newCount;
+}
