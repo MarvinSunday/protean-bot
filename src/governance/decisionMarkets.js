@@ -19,6 +19,12 @@ const ERC20_APPROVE_ABI = [
   { type: "function", name: "approve", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" },
 ];
 
+// Minimal WMON interface - deposit()/withdraw() are the WETH9-style
+// wrap/unwrap functions, confirmed directly from WMON.sol's own source.
+const WMON_ABI = [
+  { type: "function", name: "withdraw", inputs: [{ type: "uint256" }], outputs: [], stateMutability: "nonpayable" },
+];
+
 function contractFor(address) {
   return { address: getAddress(address), abi };
 }
@@ -341,6 +347,28 @@ export async function mergeTokens(client, vaultAddress, amountWhole) {
 export async function redeemTokens(client, vaultAddress) {
   const vault = vaultContract(vaultAddress);
   const hash = await client.writeContract({ ...vault, functionName: "redeemTokens", args: [] });
+  await publicClient.waitForTransactionReceipt({ hash });
+  return { hash };
+}
+
+/**
+ * Converts WMON the caller is holding back into native MON - the
+ * missing counterpart to proposeWithSeed's automatic wrap. Nothing in
+ * this system unwraps automatically: redeeming or reclaiming on the
+ * quote side of a Decision Markets proposal returns WMON, not MON, so
+ * this is the step a user runs afterward if they want native currency
+ * back rather than staying in WMON. `governanceAddress` is used to
+ * resolve the correct WMON address for this specific DAO via getWmon(),
+ * rather than assuming any fixed address - the WMON a DAO uses is
+ * whatever was passed to its factory at creation time, and could
+ * genuinely differ between DAOs on the same chain.
+ */
+export async function unwrapWmon(client, governanceAddress, amountWhole) {
+  const wmonAddress = await getWmon(governanceAddress);
+  const wmon = { address: getAddress(wmonAddress), abi: WMON_ABI };
+  const amount = parseEther(String(amountWhole));
+
+  const hash = await client.writeContract({ ...wmon, functionName: "withdraw", args: [amount] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }

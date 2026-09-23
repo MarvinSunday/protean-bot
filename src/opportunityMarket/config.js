@@ -1,4 +1,4 @@
-import { createPublicClient, http } from "viem";
+import { createPublicClient, createWalletClient, http } from "viem";
 import { sepolia } from "viem/chains";
 import { SepoliaConfig } from "@zama-fhe/relayer-sdk/node";
 
@@ -19,6 +19,22 @@ export const opportunityPublicClient = createPublicClient({
   chain: opportunityMarketChain,
   transport: http(SEPOLIA_RPC_URL),
 });
+
+/**
+ * Sepolia counterpart to contracts.js's walletClientFor - same pattern,
+ * different chain. Opportunity Market's every write action needs a
+ * client built against opportunityMarketChain (Sepolia) specifically,
+ * not monadTestnet, since it's a genuinely separate network from
+ * everything else this bot does. This was called throughout index.js's
+ * Opportunity Market commands but never actually defined here - the
+ * cause of a hard crash on startup (a named import that doesn't exist
+ * is a SyntaxError in ESM, not a runtime error, so it took the whole
+ * process down immediately rather than failing only when a command
+ * that needed it was actually used).
+ */
+export function opportunityWalletClientFor(account) {
+  return createWalletClient({ account, chain: opportunityMarketChain, transport: http(SEPOLIA_RPC_URL) });
+}
 
 /**
  * DELIBERATELY sourced from the installed @zama-fhe/relayer-sdk package
