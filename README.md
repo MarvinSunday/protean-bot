@@ -2,7 +2,7 @@
 
 Turns a Telegram group into a fully functioning DAO. Deploy a governance system under any of ten models, get a wallet, stake, propose, vote, trade decision markets, and place confidential bets — all without leaving the chat.
 
-Contracts live in the companion repo, [`monad-spaces`](https://github.com/replico-labs/Spaces). See its README for deployed addresses per network.
+Contracts live in the companion repo, [`Spaces`](https://github.com/replico-labs/Spaces). See its README for deployed addresses per network.
 
 ## Status
 
