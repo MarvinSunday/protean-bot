@@ -102,6 +102,29 @@ async function resolveToken(ctx, governanceAddress, reference) {
 }
 
 /**
+ * Delivers a privacy-sensitive result (bet contents, balances, reward
+ * amounts) via DM instead of the group chat, editing `statusMsg` down
+ * to a generic, content-free acknowledgment in the group. Unlike
+ * /contribute's DM pattern, this deliberately does NOT fall back to
+ * posting the real message in the group if the DM fails - that would
+ * defeat the entire point for genuinely sensitive content. Instead,
+ * the group is told to start a DM with the bot first, and the
+ * sensitive message itself is never posted anywhere but the DM.
+ */
+async function deliverPrivately(ctx, statusMsg, sensitiveMessage, groupAckText) {
+  try {
+    await ctx.api.sendMessage(ctx.from.id, sensitiveMessage, { parse_mode: "Markdown" });
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `📬 ${groupAckText}`);
+  } catch (dmErr) {
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      "Couldn't DM you - please start a chat with me directly first (search for this bot and hit Start), then run this command again. Nothing sensitive is posted here."
+    );
+  }
+}
+
+/**
  * Requires the chat to have a linked OpportunityMarket; replies and
  * returns null if not. Deliberately separate from requireDAO - a chat
  * can have both a DAO and a market linked at once, these are
@@ -3649,7 +3672,7 @@ bot.command("back", async (ctx) => {
 
   try {
     await opportunityBack(client, address, Number(targetId), amount);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Bet placed confidentially.");
+    await deliverPrivately(ctx, statusMsg, "✅ Bet placed confidentially.", "Confirmed your bet.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't place that bet: ${err.shortMessage || err.message}`);
@@ -3670,7 +3693,7 @@ bot.command("mybalance", async (ctx) => {
 
   try {
     const balance = await opportunityGetBalance(client, address);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Your confidential balance: *${balance}*`, { parse_mode: "Markdown" });
+    await deliverPrivately(ctx, statusMsg, `Your confidential balance: *${balance}*`, "Sent your balance.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't read your balance: ${err.shortMessage || err.message}`);
@@ -3697,7 +3720,7 @@ bot.command("mybet", async (ctx) => {
 
   try {
     const { target, amount } = await opportunityGetBet(client, address, index);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Bet #${index}: opportunity *${target}*, amount *${amount}*`, { parse_mode: "Markdown" });
+    await deliverPrivately(ctx, statusMsg, `Bet #${index}: opportunity *${target}*, amount *${amount}*`, "Sent your bet details.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't read that bet: ${err.shortMessage || err.message}`);
@@ -3729,9 +3752,7 @@ bot.command("allbets", async (ctx) => {
       return;
     }
     const lines = bets.map((b, i) => `${i + 1}. \`${short(b.bettor)}\` → opportunity *${b.target}*, amount *${b.amount}*`);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `*All bets* (${bets.length}):\n${lines.join("\n")}`, {
-      parse_mode: "Markdown",
-    });
+    await deliverPrivately(ctx, statusMsg, `*All bets* (${bets.length}):\n${lines.join("\n")}`, "Sent the full bet list.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(
@@ -3831,7 +3852,7 @@ bot.command("reclaimstake", async (ctx) => {
 
   try {
     await opportunityMarket.reclaimStake(client, address);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Stake reclaimed.");
+    await deliverPrivately(ctx, statusMsg, "✅ Stake reclaimed.", "Confirmed your stake reclaim.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't reclaim: ${err.shortMessage || err.message}`);
@@ -3852,7 +3873,7 @@ bot.command("computereward", async (ctx) => {
 
   try {
     await opportunityMarket.computeReward(client, address);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Reward computed. Use /withdrawreward to collect it.");
+    await deliverPrivately(ctx, statusMsg, "✅ Reward computed. Use /withdrawreward to collect it.", "Confirmed your reward computation.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't compute reward: ${err.shortMessage || err.message}`);
@@ -3894,7 +3915,7 @@ bot.command("withdraw", async (ctx) => {
 
   try {
     await revealAndCompleteWithdrawal(client, address, "stake");
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Stake withdrawn.");
+    await deliverPrivately(ctx, statusMsg, "✅ Stake withdrawn.", "Confirmed your withdrawal.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't withdraw: ${err.shortMessage || err.message}`);
@@ -3915,7 +3936,7 @@ bot.command("withdrawreward", async (ctx) => {
 
   try {
     await revealAndCompleteWithdrawal(client, address, "reward");
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Reward withdrawn.");
+    await deliverPrivately(ctx, statusMsg, "✅ Reward withdrawn.", "Confirmed your reward withdrawal.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't withdraw: ${err.shortMessage || err.message}`);
