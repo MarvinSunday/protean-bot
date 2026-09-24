@@ -1668,12 +1668,19 @@ bot.command("vote", async (ctx) => {
     await ensureGasFunded(account);
     const model = getChatModel(ctx.chat.id);
     const adapter = getAdapter(model);
-    await adapter.vote(client, address, id, VOTE_CHOICES[choice], reason);
+    const { weight } = await adapter.vote(client, address, id, VOTE_CHOICES[choice], reason);
+
+    const weightNote =
+      weight !== undefined
+        ? weight === 0n
+          ? "\n\n⚠️ This vote carried *zero weight* - your tokens likely weren't staked before this proposal's snapshot block. It's recorded, but didn't affect the tally. Future proposals will count your current stake correctly."
+          : `\nWeight: ${formatEther(weight)}`
+        : "";
 
     await ctx.api.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
-      `✅ Voted *${choice}* on proposal #${id}.`,
+      `✅ Voted *${choice}* on proposal #${id}.${weightNote}`,
       { parse_mode: "Markdown" }
     );
   } catch (err) {

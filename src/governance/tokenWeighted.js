@@ -47,21 +47,27 @@ export async function propose(client, governanceAddress, actions, metadataURI) {
  */
 export async function vote(client, governanceAddress, proposalId, support, reason) {
   const gov = contractFor(governanceAddress);
+  const functionName = reason ? "castVoteWithReason" : "castVote";
+  const args = reason ? [BigInt(proposalId), support, reason] : [BigInt(proposalId), support];
 
-  const hash = reason
-    ? await client.writeContract({
-        ...gov,
-        functionName: "castVoteWithReason",
-        args: [BigInt(proposalId), support, reason],
-      })
-    : await client.writeContract({
-        ...gov,
-        functionName: "castVote",
-        args: [BigInt(proposalId), support],
-      });
+  // castVote/castVoteWithReason both return the actual weight cast -
+  // simulating right before the real write gives that value directly,
+  // without needing to parse the VoteCast event (whose exact indexed/
+  // non-indexed declaration lives in a base contract this adapter
+  // doesn't have direct access to). A zero-weight vote is a real,
+  // silent risk otherwise - it succeeds on-chain exactly like a real
+  // vote, with no error and no visible difference, if the voter's
+  // tokens were staked after the proposal's snapshot block.
+  const { result: weight } = await publicClient.simulateContract({
+    ...gov,
+    functionName,
+    args,
+    account: client.account,
+  });
 
+  const hash = await client.writeContract({ ...gov, functionName, args });
   await publicClient.waitForTransactionReceipt({ hash });
-  return { hash };
+  return { hash, weight };
 }
 
 export async function queue(client, governanceAddress, proposalId) {
