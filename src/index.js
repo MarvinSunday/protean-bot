@@ -267,6 +267,7 @@ bot.command("help", async (ctx) => {
       "/treasuryassets — every known token balance held by this DAO's treasury",
       "/registertoken `<ticker> <tokenAddress>` — let `/tip`/`/tokenbalance` use a ticker for any token (creator only)",
       "/tip `<amount> <recipient> [tokenAddressOrTicker]` — send tokens to someone, from the operator-held supply (creator only). No token given: this DAO's own token. Also accepts any ticker registered with `/registertoken`.",
+      "/send `<amount> <recipient> [tokenAddressOrTicker]` — send tokens YOU hold to someone else, from your own wallet. Anyone can use this; fails if your balance is too low.",
       "/proposals — list proposals",
       "/proposal `<id>` — full detail on one proposal"
     );
@@ -994,6 +995,55 @@ bot.command("tip", async (ctx) => {
   } catch (err) {
     console.error(err);
     await ctx.reply(`Couldn't send that tip: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                              /send
+//////////////////////////////////////////////////////////////*/
+
+bot.command("send", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+
+  const model = getChatModel(ctx.chat.id);
+  if (!hasToken(model)) {
+    await ctx.reply(`This DAO uses ${model} governance, which has no token - there's nothing to send.`);
+    return;
+  }
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const parts = (ctx.match?.trim() ?? "").split(/\s+/).filter(Boolean);
+  const [amountRaw, recipientRaw, tokenRef] = parts;
+
+  if (!amountRaw || Number.isNaN(Number(amountRaw)) || Number(amountRaw) <= 0 || !recipientRaw || !isAddress(recipientRaw)) {
+    await ctx.reply(
+      "Usage: `/send <amount> <recipientAddress> [tokenAddressOrTicker]`\n\nSends tokens you're currently holding to someone else - your own wallet, your own balance, no approval needed from the DAO's creator. The token slot is optional and works the same way `/tip` does: defaults to this DAO's own token, also accepts any ticker registered with `/registertoken`. This will fail if you don't hold enough of the token to cover the amount.",
+      { parse_mode: "Markdown" }
+    );
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = walletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Sending…");
+
+  try {
+    await ensureGasFunded(account);
+    const tokenAddress = await resolveToken(ctx, address, tokenRef);
+    const { hash } = await tipTokens(client, tokenAddress, recipientRaw, amountRaw);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Sent ${amountRaw} to \`${short(recipientRaw)}\`.\nTx: \`${short(hash)}\``,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't send that: ${err.shortMessage || err.message}`);
   }
 });
 
