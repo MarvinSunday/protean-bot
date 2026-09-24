@@ -76,6 +76,38 @@ const ERC20_DECIMALS_ABI = [
   { type: "function", name: "decimals", inputs: [], outputs: [{ type: "uint8" }], stateMutability: "view" },
 ];
 
+const ERC20_ALLOWANCE_ABI = [
+  { type: "function", name: "allowance", inputs: [{ type: "address" }, { type: "address" }], outputs: [{ type: "uint256" }], stateMutability: "view" },
+  { type: "function", name: "approve", inputs: [{ type: "address" }, { type: "uint256" }], outputs: [{ type: "bool" }], stateMutability: "nonpayable" },
+];
+
+/**
+ * Approves `spenderAddress` to pull `amountRaw` of `tokenAddress` from
+ * `client`'s own wallet, but only if its current allowance is actually
+ * insufficient - avoids a redundant, gas-wasting approval transaction
+ * on every call when a prior approval already covers this amount.
+ * Missing this step entirely is exactly what caused deposit() and
+ * fundRewardPool() to revert with "ERC20: transfer amount exceeds
+ * allowance" - both do a plain transferFrom() internally, which
+ * requires this approval to exist first; nothing does this implicitly.
+ */
+async function ensureAllowance(client, tokenAddress, spenderAddress, amountRaw) {
+  const token = { address: getAddress(tokenAddress), abi: ERC20_ALLOWANCE_ABI };
+  const currentAllowance = await opportunityPublicClient.readContract({
+    ...token,
+    functionName: "allowance",
+    args: [client.account.address, getAddress(spenderAddress)],
+  });
+  if (currentAllowance >= amountRaw) return;
+
+  const hash = await client.writeContract({
+    ...token,
+    functionName: "approve",
+    args: [getAddress(spenderAddress), amountRaw],
+  });
+  await opportunityPublicClient.waitForTransactionReceipt({ hash });
+}
+
 /**
  * Exported so encryptedBet.js can reuse this for back()'s amount too,
  * keeping decimal handling consistent across every action that moves
@@ -91,6 +123,12 @@ export async function getUnderlyingDecimals(marketAddress) {
   });
 }
 
+/** The market's real underlying token address - kept separate from getUnderlyingDecimals so that widely-used function's return shape never changes. */
+export async function getUnderlyingTokenAddress(marketAddress) {
+  const gov = marketContract(marketAddress);
+  return opportunityPublicClient.readContract({ ...gov, functionName: "underlyingToken" });
+}
+
 /**
  * Deposits `amountWhole` of the underlying token into the market -
  * separate from backing an opportunity. This initial deposit is
@@ -103,10 +141,15 @@ export async function getUnderlyingDecimals(marketAddress) {
 export async function deposit(client, marketAddress, amountWhole) {
   const gov = marketContract(marketAddress);
   const decimals = await getUnderlyingDecimals(marketAddress);
+  const amount = parseUnits(String(amountWhole), decimals);
+
+  const tokenAddress = await getUnderlyingTokenAddress(marketAddress);
+  await ensureAllowance(client, tokenAddress, marketAddress, amount);
+
   const hash = await client.writeContract({
     ...gov,
     functionName: "deposit",
-    args: [parseUnits(String(amountWhole), decimals)],
+    args: [amount],
   });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash };
@@ -116,10 +159,15 @@ export async function deposit(client, marketAddress, amountWhole) {
 export async function fundRewardPool(client, marketAddress, amountWhole) {
   const gov = marketContract(marketAddress);
   const decimals = await getUnderlyingDecimals(marketAddress);
+  const amount = parseUnits(String(amountWhole), decimals);
+
+  const tokenAddress = await getUnderlyingTokenAddress(marketAddress);
+  await ensureAllowance(client, tokenAddress, marketAddress, amount);
+
   const hash = await client.writeContract({
     ...gov,
     functionName: "fundRewardPool",
-    args: [parseUnits(String(amountWhole), decimals)],
+    args: [amount],
   });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash };
