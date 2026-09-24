@@ -22,6 +22,7 @@ const abis = {
 };
 
 const welcomeDistributorArtifact = loadAbi("WelcomeDistributorArtifact");
+const nftMarketplaceWrapperArtifact = loadAbi("NFTMarketplaceWrapperArtifact");
 
 // Mirrors Types.sol's ProposalState enum exactly - order and count matter.
 export const PROPOSAL_STATE_LABELS = [
@@ -512,6 +513,24 @@ export async function deployWelcomeDistributor(client, tokenAddress, governanceA
   });
   const receipt = await publicClient.waitForTransactionReceipt({ hash });
   return { hash, distributorAddress: receipt.contractAddress };
+}
+
+/**
+ * Deploys a fresh NFTMarketplaceWrapper for a DAO - one per DAO, same
+ * on-demand pattern as deployChainlinkOracle, not shared, since (unlike
+ * a price adapter) this one temporarily holds real assets. Real,
+ * verified bytecode - extracted directly from compiling
+ * NFTMarketplaceWrapper.sol against the actual installed OpenZeppelin
+ * package, not assumed or hand-written.
+ */
+export async function deployNftWrapper(client, governanceAddress, treasuryAddress) {
+  const hash = await client.deployContract({
+    abi: nftMarketplaceWrapperArtifact.abi,
+    bytecode: nftMarketplaceWrapperArtifact.bytecode,
+    args: [getAddress(governanceAddress), getAddress(treasuryAddress)],
+  });
+  const receipt = await publicClient.waitForTransactionReceipt({ hash });
+  return { hash, wrapperAddress: receipt.contractAddress };
 }
 
 export { formatEther };

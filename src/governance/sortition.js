@@ -314,7 +314,7 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
       parseEther(String(maxSupplyWhole)),
       getAddress(randomnessSource),
       config,
-      initialCouncil.map(getAddress),
+      initialCouncil.map((s) => getAddress(s.toLowerCase())),
     ],
   });
   await publicClient.waitForTransactionReceipt({ hash });

@@ -12,6 +12,8 @@ import {
   unregisterChat,
   registerDistributor,
   getChatDistributor,
+  registerNftWrapper,
+  getChatNftWrapper,
   registerMarket,
   getChatMarket,
   unregisterMarket,
@@ -33,6 +35,7 @@ import {
   getTokenSymbol,
   getUnderlyingTokenAddress,
   deployWelcomeDistributor,
+  deployNftWrapper,
 } from "./contracts.js";
 import { getAdapter, SUPPORTED_MODELS } from "./governance/index.js";
 import { createDAO as createQuadraticDAO } from "./governance/quadratic.js";
@@ -246,6 +249,7 @@ bot.command("help", async (ctx) => {
     "/register `<governance_address> [model]` — link this group to an existing DAO (admin)",
     "/unregister — unlink this group (admin)",
     "/deploywelcomedistributor `<amountPerClaim> <distributionCap>` — deploy a fresh welcome distributor for this DAO's token (creator only)",
+    "/deploynftwrapper — deploy this DAO's NFT marketplace wrapper (creator only, one per DAO)",
     "/setdistributor `<address>` — link a welcome-token distributor (admin)",
     "",
     "*Your wallet*",
@@ -341,7 +345,7 @@ bot.command("createdao", async (ctx) => {
   if (args.length < 4) {
     await ctx.reply(
       [
-        "Usage: `/createdao <name> <symbol> <initialSupply> <maxSupply> [model] [extra...]`",
+        "Usage: `/createdao <name> <symbol> <initialSupply> <maxSupply> [model] [network] [extra...]`",
         "",
         "Example: `/createdao ArkDAO ARK 1000000 10000000`",
         "Example (quadratic): `/createdao ArkDAO ARK 1000000 10000000 quadratic`",
@@ -350,6 +354,8 @@ bot.command("createdao", async (ctx) => {
         "",
         `Models: ${Object.keys(CREATE_DAO_FUNCTIONS).join(", ")} (defaults to tokenWeighted). Board has no token at all - use /createboarddao instead.`,
         "",
+        "Network can go anywhere after the model (`monad`, `hyperliquid`, or `base`) - only `monad` is actually live right now, the others are recognized but not deployable yet.",
+        "",
         "⚠️ Name and symbol must be single words (no spaces) for now.",
       ].join("\n"),
       { parse_mode: "Markdown" }
@@ -357,10 +363,31 @@ bot.command("createdao", async (ctx) => {
     return;
   }
 
-  const [name, symbol, initialSupplyStr, maxSupplyStr, modelArg, ...rest] = args;
+  const [name, symbol, initialSupplyStr, maxSupplyStr, modelArg, ...restArgs] = args;
   const model = modelArg || "tokenWeighted";
   const initialSupply = Number(initialSupplyStr);
   const maxSupply = Number(maxSupplyStr);
+
+  // Network is detected anywhere in the trailing args, not a fixed
+  // position - a network name (a plain word) can never collide with a
+  // council address (always 0x-prefixed hex), so this is safe
+  // regardless of how many council addresses follow it. Only "monad"
+  // is actually deployable right now; Hyperliquid and Base are
+  // recognized and rejected with a clear reason, not silently ignored,
+  // so this same syntax keeps working once either goes live without
+  // another command-format change.
+  const KNOWN_NETWORKS = ["monad", "hyperliquid", "base"];
+  let network = "monad";
+  let rest = restArgs;
+  const networkIndex = restArgs.findIndex((arg) => KNOWN_NETWORKS.includes(arg.toLowerCase()));
+  if (networkIndex !== -1) {
+    network = restArgs[networkIndex].toLowerCase();
+    rest = [...restArgs.slice(0, networkIndex), ...restArgs.slice(networkIndex + 1)];
+  }
+  if (network !== "monad") {
+    await ctx.reply(`"${network}" isn't deployed yet - only Monad is available right now. Your DAO will need to wait until it's live there.`);
+    return;
+  }
 
   if (!Number.isFinite(initialSupply) || !Number.isFinite(maxSupply) || initialSupply <= 0 || maxSupply <= 0) {
     await ctx.reply("Initial supply and max supply must be positive numbers.");
@@ -384,7 +411,7 @@ bot.command("createdao", async (ctx) => {
 
   let extra = {};
   if (model === "delegate") {
-    if (rest.length === 0 || !rest.every(isAddress)) {
+    if (rest.length === 0 || !rest.every((s) => isAddress(s, { strict: false }))) {
       await ctx.reply("Delegate needs a starting council: `/createdao <name> <symbol> <initialSupply> <maxSupply> delegate <address...>`", { parse_mode: "Markdown" });
       return;
     }
@@ -394,7 +421,7 @@ bot.command("createdao", async (ctx) => {
       await ctx.reply("This bot has no randomness source configured yet - ask an admin to set SORTITION_RANDOMNESS_SOURCE.");
       return;
     }
-    if (rest.length === 0 || !rest.every(isAddress)) {
+    if (rest.length === 0 || !rest.every((s) => isAddress(s, { strict: false }))) {
       await ctx.reply("Sortition needs a starting council: `/createdao <name> <symbol> <initialSupply> <maxSupply> sortition <address...>`", { parse_mode: "Markdown" });
       return;
     }
@@ -407,7 +434,7 @@ bot.command("createdao", async (ctx) => {
     const result = await createFn(name, symbol, initialSupply, maxSupply, extra);
 
     // Auto-link this chat to the new DAO, saving a manual /register step.
-    registerChat(ctx.chat.id, result.governance, model, "telegram", ctx.from.id);
+    registerChat(ctx.chat.id, result.governance, model, "telegram", ctx.from.id, network);
 
     const lines = [
       `✅ *${name}* (${model}) created and linked to this group.`,
@@ -455,7 +482,7 @@ bot.command("createboarddao", async (ctx) => {
   }
 
   const [name, ...signers] = args;
-  if (!signers.every(isAddress)) {
+  if (!signers.every((s) => isAddress(s, { strict: false }))) {
     await ctx.reply("All signer addresses must be valid.");
     return;
   }
@@ -582,6 +609,48 @@ bot.command("deploywelcomedistributor", async (ctx) => {
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't deploy the distributor: ${err.shortMessage || err.message}`);
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                        /deploynftwrapper
+//////////////////////////////////////////////////////////////*/
+
+bot.command("deploynftwrapper", async (ctx) => {
+  const address = await requireDAO(ctx);
+  if (!address) return;
+
+  const chatCreator = getChatCreator(ctx.chat.id);
+  if (!chatCreator || String(ctx.from.id) !== chatCreator) {
+    await ctx.reply("Only this DAO's creator can deploy an NFT marketplace wrapper.");
+    return;
+  }
+
+  const existing = getChatNftWrapper(ctx.chat.id);
+  if (existing) {
+    await ctx.reply(`This DAO already has one deployed at \`${short(existing)}\`. Deploying another won't replace it automatically.`, {
+      parse_mode: "Markdown",
+    });
+    return;
+  }
+
+  const statusMsg = await ctx.reply("⏳ Deploying an NFT marketplace wrapper…");
+
+  try {
+    const model = getChatModel(ctx.chat.id);
+    const { treasuryAddress } = await getDaoInfo(model, address);
+    const { wrapperAddress } = await deployNftWrapper(walletClient, address, treasuryAddress);
+    registerNftWrapper(ctx.chat.id, wrapperAddress);
+
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `✅ Deployed at \`${short(wrapperAddress)}\`.\n\nThis wrapper is now linked to this DAO. Governance-gated only - approving listings, sending NFTs to it, and sweeping assets back to Treasury all need to go through a passed \`/propose\`, same as any other treasury action.`,
+      { parse_mode: "Markdown" }
+    );
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't deploy the wrapper: ${err.shortMessage || err.message}`);
   }
 });
 
@@ -1006,11 +1075,6 @@ bot.command("send", async (ctx) => {
   const address = await requireDAO(ctx);
   if (!address) return;
 
-  const model = getChatModel(ctx.chat.id);
-  if (!hasToken(model)) {
-    await ctx.reply(`This DAO uses ${model} governance, which has no token - there's nothing to send.`);
-    return;
-  }
   if (!isWalletStoreConfigured()) {
     await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
     return;
@@ -1021,10 +1085,26 @@ bot.command("send", async (ctx) => {
 
   if (!amountRaw || Number.isNaN(Number(amountRaw)) || Number(amountRaw) <= 0 || !recipientRaw || !isAddress(recipientRaw)) {
     await ctx.reply(
-      "Usage: `/send <amount> <recipientAddress> [tokenAddressOrTicker]`\n\nSends tokens you're currently holding to someone else - your own wallet, your own balance, no approval needed from the DAO's creator. The token slot is optional and works the same way `/tip` does: defaults to this DAO's own token, also accepts any ticker registered with `/registertoken`. This will fail if you don't hold enough of the token to cover the amount.",
+      "Usage: `/send <amount> <recipientAddress> [tokenAddressOrTicker]`\n\nSends tokens (or native MON) you're currently holding to someone else - your own wallet, your own balance, no approval needed from the DAO's creator. The token slot is optional: defaults to this DAO's own token, also accepts `MON` for native currency, or any ticker registered with `/registertoken`. This will fail if you don't hold enough to cover the amount.",
       { parse_mode: "Markdown" }
     );
     return;
+  }
+
+  // MON is native currency, independent of whether this DAO's model
+  // even has a governance token at all (Board has none) - handled
+  // entirely separately from the token-transfer path below, since it
+  // needs a plain sendTransaction, not an ERC20 call.
+  const isNativeMon = tokenRef?.toUpperCase() === "MON";
+
+  if (!isNativeMon) {
+    const model = getChatModel(ctx.chat.id);
+    if (!hasToken(model)) {
+      await ctx.reply(`This DAO uses ${model} governance, which has no token - there's nothing to send. Try \`/send ${amountRaw} ${recipientRaw} MON\` to send native currency instead.`, {
+        parse_mode: "Markdown",
+      });
+      return;
+    }
   }
 
   const account = await getOrCreateUserAccount(ctx.from.id);
@@ -1033,12 +1113,20 @@ bot.command("send", async (ctx) => {
 
   try {
     await ensureGasFunded(account);
-    const tokenAddress = await resolveToken(ctx, address, tokenRef);
-    const { hash } = await tipTokens(client, tokenAddress, recipientRaw, amountRaw);
+
+    let hash;
+    if (isNativeMon) {
+      hash = await client.sendTransaction({ to: getAddress(recipientRaw), value: parseEther(amountRaw) });
+      await publicClient.waitForTransactionReceipt({ hash });
+    } else {
+      const tokenAddress = await resolveToken(ctx, address, tokenRef);
+      ({ hash } = await tipTokens(client, tokenAddress, recipientRaw, amountRaw));
+    }
+
     await ctx.api.editMessageText(
       ctx.chat.id,
       statusMsg.message_id,
-      `✅ Sent ${amountRaw} to \`${short(recipientRaw)}\`.\nTx: \`${short(hash)}\``,
+      `✅ Sent ${amountRaw}${isNativeMon ? " MON" : ""} to \`${short(recipientRaw)}\`.\nTx: \`${short(hash)}\``,
       { parse_mode: "Markdown" }
     );
   } catch (err) {

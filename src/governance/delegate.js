@@ -172,7 +172,7 @@ export async function voteInElection(client, governanceAddress, electionId, cand
   const hash = await client.writeContract({
     ...gov,
     functionName: "voteInElection",
-    args: [BigInt(electionId), candidateAddresses.map(getAddress)],
+    args: [BigInt(electionId), candidateAddresses.map((s) => getAddress(s.toLowerCase()))],
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
@@ -302,7 +302,7 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
       parseEther(String(initialSupplyWhole)),
       parseEther(String(maxSupplyWhole)),
       config,
-      initialCouncil.map(getAddress),
+      initialCouncil.map((s) => getAddress(s.toLowerCase())),
     ],
   });
   await publicClient.waitForTransactionReceipt({ hash });

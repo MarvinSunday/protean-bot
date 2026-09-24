@@ -228,7 +228,7 @@ export async function createDAO(name, initialSigners) {
   const hash = await walletClient.writeContract({
     ...factory,
     functionName: "createDAO",
-    args: [name, config, initialSigners.map(getAddress)],
+    args: [name, config, initialSigners.map((s) => getAddress(s.toLowerCase()))],
   });
   await publicClient.waitForTransactionReceipt({ hash });
 

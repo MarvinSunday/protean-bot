@@ -53,14 +53,30 @@ function key(chatId, platform) {
  * linking an already-existing, externally-deployed DAO via /register,
  * since the bot has no real basis for saying who "created" that one.
  */
-export function registerChat(chatId, governanceAddress, model = "tokenWeighted", platform = "telegram", creatorPlatformUserId = undefined) {
+/**
+ * `network` records which chain this DAO actually lives on - Monad,
+ * Hyperliquid, or Base. Defaults to "monad" for every existing chat
+ * registered before this field existed, since that's the only network
+ * this bot has ever actually deployed to. Genuinely functional for
+ * Monad today; Hyperliquid and Base can be recorded here once a real
+ * factory exists on either, but nothing downstream (wallet clients,
+ * governance adapters) is wired to act on those values yet - see
+ * config.js and contracts.js, both still hardcoded to Monad.
+ */
+export function registerChat(chatId, governanceAddress, model = "tokenWeighted", platform = "telegram", creatorPlatformUserId = undefined, network = "monad") {
   const db = readDb();
   const k = key(chatId, platform);
   const creatorField = creatorPlatformUserId !== undefined
     ? { creatorPlatformUserId: String(creatorPlatformUserId) }
     : {};
-  db[k] = { ...db[k], governanceAddress, model, platform, ...creatorField, registeredAt: Date.now() };
+  db[k] = { ...db[k], governanceAddress, model, platform, ...creatorField, network, registeredAt: Date.now() };
   writeDb(db);
+}
+
+/** Which network this chat's DAO lives on - "monad" for every DAO registered so far. */
+export function getChatNetwork(chatId, platform = "telegram") {
+  const db = readDb();
+  return db[key(chatId, platform)]?.network ?? "monad";
 }
 
 /**
@@ -133,6 +149,20 @@ export function registerDistributor(chatId, distributorAddress, platform = "tele
 export function getChatDistributor(chatId, platform = "telegram") {
   const db = readDb();
   return db[key(chatId, platform)]?.distributorAddress ?? null;
+}
+
+/** Link a chat's NFTMarketplaceWrapper address (optional, separate from Governance/Treasury). */
+export function registerNftWrapper(chatId, wrapperAddress, platform = "telegram") {
+  const db = readDb();
+  const k = key(chatId, platform);
+  db[k] = { ...db[k], wrapperAddress, platform };
+  writeDb(db);
+}
+
+/** Get the NFTMarketplaceWrapper address linked to a chat, or null if unset. */
+export function getChatNftWrapper(chatId, platform = "telegram") {
+  const db = readDb();
+  return db[key(chatId, platform)]?.wrapperAddress ?? null;
 }
 
 export function unregisterChat(chatId, platform = "telegram") {
