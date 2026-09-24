@@ -1387,7 +1387,7 @@ bot.command("propose", async (ctx) => {
   const statusMsg = await ctx.reply("⏳ Submitting proposal…");
 
   try {
-    await ensureGasFunded(account);
+    await ensureGasFunded(account, true);
     const adapter = getAdapter(model);
     const actions = [{ target: getAddress(target), value: BigInt(value || 0), data: data || "0x" }];
     const { proposalId } = await adapter.propose(client, address, actions, description);
@@ -1522,7 +1522,7 @@ bot.command("proposecriteria", async (ctx) => {
   const statusMsg = await ctx.reply("⏳ Submitting proposal…");
 
   try {
-    await ensureGasFunded(account);
+    await ensureGasFunded(account, true);
     const adapter = getAdapter("sowellian");
     const actions = [{ target: getAddress(target), value: BigInt(value || 0), data: data || "0x" }];
     const resolutionMethod = method === "oracle" ? 0 : 1;
@@ -1608,7 +1608,7 @@ bot.command("proposemarket", async (ctx) => {
   const statusMsg = await ctx.reply("⏳ Deploying and seeding both markets — this takes a moment…");
 
   try {
-    await ensureGasFunded(account);
+    await ensureGasFunded(account, true);
     const adapter = getAdapter("decisionMarkets");
     const actions = [{ target: getAddress(target), value: BigInt(value || 0), data: data || "0x" }];
 

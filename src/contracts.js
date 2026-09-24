@@ -244,7 +244,37 @@ const REPEAT_GAS_TOPUP_AMOUNT = parseEther("0.05");
  * operator wallet is configured (caller's own transaction will then just
  * fail with an insufficient-funds error, which is an honest failure mode).
  */
-export async function ensureGasFunded(account) {
+/**
+ * Tops up `account` with MON from the operator wallet if its balance is
+ * below a threshold. Derived wallets start with zero MON and can't pay
+ * gas for their own first transaction without this - the operator
+ * wallet effectively sponsors a small amount of gas per user.
+ *
+ * Tiered for this testnet: a user's very first top-up is larger
+ * (0.1 MON) than every one after it (0.05 MON) by default. Some
+ * actions cost meaningfully more gas than a typical repeat action -
+ * observed directly in testing: a propose() call carrying an embedded
+ * action needed 0.0703 MON, more than the flat 0.05 MON repeat amount
+ * could cover, causing repeated genuine failures (not a timing race -
+ * every retry got topped up with the same insufficient amount).
+ * `forceFullTopup` lets a caller that knows its action is heavier than
+ * typical (propose() being the confirmed case) request the full
+ * first-time amount regardless of this account's top-up history,
+ * without changing the default tiering for lighter, more common
+ * actions like tips or plain transfers.
+ *
+ * Falls back to the first-time amount, every time, for a wallet whose
+ * top-up history can't be tracked - Supabase not configured, or the
+ * address has no record there at all (a legacy derived wallet, see
+ * wallet.js) - rather than fail the whole transaction over a
+ * wallet-store lookup on what is otherwise a real transaction the user
+ * is trying to complete.
+ *
+ * Silently does nothing if the account already has enough, or if no
+ * operator wallet is configured (caller's own transaction will then just
+ * fail with an insufficient-funds error, which is an honest failure mode).
+ */
+export async function ensureGasFunded(account, forceFullTopup = false) {
   if (!walletClient || !operatorAccount) return;
 
   const balance = await publicClient.getBalance({ address: account.address });
@@ -254,7 +284,7 @@ export async function ensureGasFunded(account) {
   if (isWalletStoreConfigured()) {
     try {
       const topupNumber = await recordGasTopup(account.address);
-      if (topupNumber !== null && topupNumber > 1) {
+      if (!forceFullTopup && topupNumber !== null && topupNumber > 1) {
         topupAmount = REPEAT_GAS_TOPUP_AMOUNT;
       }
     } catch (err) {
