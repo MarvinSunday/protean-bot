@@ -269,6 +269,24 @@ export async function ensureGasFunded(account) {
     value: topupAmount,
   });
   await publicClient.waitForTransactionReceipt({ hash });
+
+  // A confirmed receipt means the top-up is mined, but on a
+  // high-throughput chain that doesn't always mean every subsequent
+  // RPC call sees the updated balance immediately - observed directly
+  // in testing: a first-ever transaction submitted right after a
+  // top-up's receipt confirmed still failed with "insufficient
+  // balance" at the node, even though the top-up amount was nearly 7x
+  // what the transaction actually needed. A short, bounded poll here
+  // is more reliable than a fixed delay: it returns as soon as the
+  // balance is genuinely visible (no wasted time in the common case
+  // where it already is), and adapts to however long propagation
+  // actually takes rather than guessing a duration that might be too
+  // short under different network conditions.
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const updatedBalance = await publicClient.getBalance({ address: account.address });
+    if (updatedBalance >= MIN_GAS_BALANCE) return;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+  }
 }
 
 /**
