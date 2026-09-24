@@ -3648,7 +3648,7 @@ bot.command("back", async (ctx) => {
   const statusMsg = await ctx.reply("⏳ Encrypting and submitting your bet — this takes a moment…");
 
   try {
-    await opportunityBack(client, address, targetId, amount);
+    await opportunityBack(client, address, Number(targetId), amount);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "✅ Bet placed confidentially.");
   } catch (err) {
     console.error(err);
