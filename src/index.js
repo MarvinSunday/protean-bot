@@ -63,10 +63,22 @@ import { findWalletRecord, createWalletRecord, isWalletStoreConfigured } from ".
 import { opportunityWalletClientFor, isOpportunityMarketConfigured } from "./opportunityMarket/config.js";
 import * as opportunityMarket from "./opportunityMarket/market.js";
 import { back as opportunityBack } from "./opportunityMarket/encryptedBet.js";
-import { getBalance as opportunityGetBalance, getBet as opportunityGetBet, getAllBets as opportunityGetAllBets } from "./opportunityMarket/decrypt.js";
+import { getBalance as opportunityGetBalance, getBet as opportunityGetBet, getAllBets as opportunityGetAllBets, getMarketAnalytics as opportunityGetAnalytics } from "./opportunityMarket/decrypt.js";
 import { revealAndCompleteWinningTotal, revealAndCompleteWithdrawal } from "./opportunityMarket/publicReveal.js";
 
 const bot = new Bot(BOT_TOKEN);
+
+/**
+ * Tracks users mid-way through a privacy-preserving /back flow: they
+ * ran bare `/back` in a group, and the bot is now waiting for their
+ * next DM to contain the actual opportunity id and amount. Keyed by
+ * Telegram user id. In-memory only, not persisted - an abandoned flow
+ * (user never replies, or the bot restarts) just quietly expires
+ * rather than causing any harm; a later /back attempt simply
+ * overwrites whatever was pending.
+ */
+const pendingBackRequests = new Map();
+
 
 console.log("Protean bot starting (long polling)...");
 
@@ -111,6 +123,38 @@ async function resolveToken(ctx, governanceAddress, reference) {
  * the group is told to start a DM with the bot first, and the
  * sensitive message itself is never posted anywhere but the DM.
  */
+/**
+ * Sends `lines` as one or more messages, splitting between lines
+ * (never mid-line) whenever a running chunk would exceed Telegram's
+ * real 4096-character limit. Built specifically for /help: with
+ * intuitive, fuller explanations per command, a chat with a model like
+ * Sowellian (the longest single model block) AND a linked Opportunity
+ * Market can genuinely exceed the limit in one combined message -
+ * confirmed directly by measuring the actual worst case, not assumed.
+ * A fixed safety margin below the real limit (rather than the exact
+ * number) covers Markdown formatting characters Telegram counts
+ * differently than raw string length.
+ */
+async function replyChunked(ctx, lines, options = {}) {
+  const MAX_CHUNK_CHARS = 3800;
+  let chunk = [];
+  let chunkLength = 0;
+
+  for (const line of lines) {
+    const lineLength = line.length + 1; // +1 for the newline that'll join it
+    if (chunk.length > 0 && chunkLength + lineLength > MAX_CHUNK_CHARS) {
+      await ctx.reply(chunk.join("\n"), options);
+      chunk = [];
+      chunkLength = 0;
+    }
+    chunk.push(line);
+    chunkLength += lineLength;
+  }
+  if (chunk.length > 0) {
+    await ctx.reply(chunk.join("\n"), options);
+  }
+}
+
 async function deliverPrivately(ctx, statusMsg, sensitiveMessage, groupAckText) {
   try {
     await ctx.api.sendMessage(ctx.from.id, sensitiveMessage, { parse_mode: "Markdown" });
@@ -161,123 +205,123 @@ bot.command("start", (ctx) =>
  */
 const MODEL_HELP_BLOCKS = {
   tokenWeighted: [
-    "/propose `<target> <value> <data> <description>` — create a proposal",
-    "/vote `<id> for|against|abstain [reason]` — cast a vote",
-    "/queue `<id>` — queue a passed proposal",
-    "/execute `<id>` — execute a queued proposal",
-    "/cancel `<id>` — cancel your own proposal",
+    "/propose `<target> <value> <data> <description>` — the main way to make something happen: propose an on-chain action (e.g. sending funds) for the DAO to vote on",
+    "/vote `<id> for|against|abstain [reason]` — cast your vote on a proposal that's currently open, weighted by your staked balance",
+    "/queue `<id>` — once a proposal has passed, this starts its timelock countdown before it can actually run",
+    "/execute `<id>` — after the timelock clears, this actually carries out the proposal's action",
+    "/cancel `<id>` — pull back your own proposal before anyone executes it",
   ],
   quadratic: [
-    "/propose `<target> <value> <data> <description>` — create a proposal",
-    "/vote `<id> for|against|abstain` — cast a vote (weight is √ of your staked balance)",
-    "/queue `<id>` — queue a passed proposal",
-    "/execute `<id>` — execute a queued proposal",
-    "/cancel `<id>` — cancel your own proposal",
+    "/propose `<target> <value> <data> <description>` — propose an on-chain action for the DAO to vote on",
+    "/vote `<id> for|against|abstain` — cast your vote; your weight is the square root of your staked balance, so whales matter less here than in a plain token vote",
+    "/queue `<id>` — start the timelock countdown on a passed proposal",
+    "/execute `<id>` — carry out the proposal once its timelock has cleared",
+    "/cancel `<id>` — withdraw your own proposal before execution",
   ],
   liquid: [
-    "/propose `<target> <value> <data> <description>` — create a proposal",
-    "/vote `<id> for|against|abstain` — cast a vote",
-    "/queue `<id>` — queue a passed proposal",
-    "/execute `<id>` — execute a queued proposal",
-    "/cancel `<id>` — cancel your own proposal",
-    "/delegate `<address>` — send your voting power to someone else",
-    "/undelegate — take your voting power back",
+    "/propose `<target> <value> <data> <description>` — propose an on-chain action for the DAO to vote on",
+    "/vote `<id> for|against|abstain` — cast your vote directly, even if you've delegated (your delegate's vote doesn't override yours)",
+    "/queue `<id>` — start the timelock countdown on a passed proposal",
+    "/execute `<id>` — carry out the proposal once its timelock has cleared",
+    "/cancel `<id>` — withdraw your own proposal before execution",
+    "/delegate `<address>` — too busy to vote on everything? Hand your voting power to someone you trust — you can still vote yourself any time",
+    "/undelegate — take your voting power back from whoever you delegated to",
   ],
   optimistic: [
-    "/propose `<target> <value> <data> <description>` — create a proposal (passes by default unless challenged)",
-    "/challenge `<id>` — dispute a proposal within its challenge window, opening a fallback vote",
-    "/vote `<id> for|against|abstain` — vote (only works once a proposal has been challenged)",
-    "/queue `<id>` — finalizes a proposal, whether challenged or not",
-    "/execute `<id>` — execute a queued proposal",
-    "/cancel `<id>` — cancel your own proposal",
+    "/propose `<target> <value> <data> <description>` — propose an action that passes automatically after its challenge window, unless someone disputes it",
+    "/challenge `<id>` — think a proposal shouldn't just sail through? Dispute it here, which forces it into an actual vote instead",
+    "/vote `<id> for|against|abstain` — only usable once a proposal has been challenged — settles the dispute",
+    "/queue `<id>` — finalizes a proposal once its window closes, whether it was challenged or not",
+    "/execute `<id>` — carry out a queued proposal",
+    "/cancel `<id>` — withdraw your own proposal before execution",
   ],
   delegate: [
-    "/propose `<target> <value> <data> <description>` — create a proposal (council members only)",
-    "/vote `<id> for|against|abstain` — cast a vote (council members only)",
-    "/queue `<id>` — queue a passed proposal",
-    "/execute `<id>` — execute a queued proposal",
-    "/cancel `<id>` — cancel your own proposal",
-    "/council — see the current council",
-    "/startelection — open a new council election",
-    "/declarecandidacy `<electionId>` — run for council",
-    "/voteinelection `<electionId> <candidate...>` — vote for candidates",
-    "/finalizeelection `<electionId>` — close the election and seat the new council",
-    "/initiaterecall `<address>` — start a vote to remove a sitting council member",
-    "/voterecall `<recallId> for|against|abstain` — vote on a recall",
-    "/finalizerecall `<recallId>` — close the recall vote",
+    "/propose `<target> <value> <data> <description>` — council members only: propose an on-chain action",
+    "/vote `<id> for|against|abstain` — council members only: cast a vote",
+    "/queue `<id>` — start the timelock countdown on a passed proposal",
+    "/execute `<id>` — carry out the proposal once its timelock has cleared",
+    "/cancel `<id>` — withdraw your own proposal before execution",
+    "/council — see who's currently seated",
+    "/startelection — open up a new election for council seats",
+    "/declarecandidacy `<electionId>` — put your own name forward in an open election",
+    "/voteinelection `<electionId> <candidate...>` — vote for one or more candidates",
+    "/finalizeelection `<electionId>` — close voting and seat whoever won",
+    "/initiaterecall `<address>` — think a sitting council member should be removed early? Start a vote on it",
+    "/voterecall `<recallId> for|against|abstain` — vote on an active recall",
+    "/finalizerecall `<recallId>` — close the recall vote and remove the member if it passed",
   ],
   board: [
-    "/propose `<target> <value> <data> <description>` — create a proposal",
-    "/confirm `<id>` — confirm a proposal as a signer",
-    "/revoke `<id>` — withdraw your confirmation",
-    "/execute `<id>` — execute a proposal once enough signers confirmed",
-    "/cancel `<id>` — cancel your own proposal",
+    "/propose `<target> <value> <data> <description>` — propose an on-chain action for the signers to approve",
+    "/confirm `<id>` — add your signature as one of the required approvals",
+    "/revoke `<id>` — change your mind and pull your signature back",
+    "/execute `<id>` — once enough signers have confirmed, run the proposal's action",
+    "/cancel `<id>` — withdraw your own proposal before execution",
   ],
   sortition: [
-    "/propose `<target> <value> <data> <description>` — create a proposal (anyone meeting the eligibility threshold)",
-    "/vote `<id> for|against|abstain` — cast a vote (council members only)",
-    "/queue `<id>` — queue a passed proposal",
-    "/execute `<id>` — execute a queued proposal",
-    "/cancel `<id>` — cancel your own proposal",
-    "/council — see the current council",
-    "/registereligible — opt into the pool for future sortition draws",
-    "/withdraweligibility — opt back out",
-    "/startsortition — request a random draw for a new council",
-    "/settlesortition — settle Switchboard's randomness once ready (anyone can call this)",
-    "/finalizesortition — draw the new council once randomness is settled",
+    "/propose `<target> <value> <data> <description>` — anyone who meets the eligibility threshold can propose an action",
+    "/vote `<id> for|against|abstain` — council members only: cast a vote",
+    "/queue `<id>` — start the timelock countdown on a passed proposal",
+    "/execute `<id>` — carry out the proposal once its timelock has cleared",
+    "/cancel `<id>` — withdraw your own proposal before execution",
+    "/council — see who's currently seated",
+    "/registereligible — want a shot at being randomly picked for the next council? Opt in here",
+    "/withdraweligibility — take yourself out of the running",
+    "/startsortition — kick off a new random council draw (requests randomness from the configured provider)",
+    "/settlesortition — once the randomness provider's delay has passed, submit the result on-chain — anyone can run this, not just admins",
+    "/finalizesortition — draw the actual new council once randomness has settled",
   ],
   conviction: [
-    "/propose `<target> <value> <data> <description>` — create a proposal",
-    "/support `<id>` — back a proposal with your entire staked balance",
-    "/withdrawsupport — stop backing whatever you're currently supporting",
+    "/propose `<target> <value> <data> <description>` — propose an on-chain action for the DAO to back",
+    "/support `<id>` — commit your entire staked balance behind a proposal; your influence on it grows the longer you keep it committed",
+    "/withdrawsupport — stop backing whatever proposal you're currently supporting",
     "/mysupport — check which proposal (if any) you're currently backing",
-    "/queue `<id>` — queue once accumulated conviction clears the threshold",
-    "/execute `<id>` — execute a queued proposal",
-    "/cancel `<id>` — cancel your own proposal",
+    "/queue `<id>` — once accumulated support clears the threshold, start the timelock",
+    "/execute `<id>` — carry out the proposal once its timelock has cleared",
+    "/cancel `<id>` — withdraw your own proposal before execution",
   ],
   sowellian: [
-    "/deploychainlinkoracle `<chainlinkFeedAddress>` — deploy a fresh oracle adapter for a real Chainlink Data Feed",
-    "/proposecriteria `<target> <value> <data> <oracle|human> <oracleAddress|switchboard|-> <oracleSelector|-> <targetValue> <min|max> <measurementPeriod> <description>` — create a proposal",
-    "/castapprovalvote `<id> for|against|abstain` — vote on whether it opens for betting",
-    "/finalizeapproval `<id>` — close the approval vote",
-    "/takeposition `<id> yes|no <amount>` — back an outcome",
-    "/execute `<id>` — run the proposal's actions once positions close",
-    "/resolveviaoracle `<id>` — resolve automatically (oracle-track proposals)",
-    "/proposeresolution `<id> success|failure` — state what you believe happened (human-track)",
-    "/challengeresolution `<id>` — dispute a proposed resolution",
-    "/finalizeunchallenged `<id>` — finalize a resolution nobody disputed",
-    "/castadjudicationvote `<id> success|failure` — vote on a disputed resolution",
-    "/finalizeadjudication `<id>` — close the adjudication vote",
-    "/claimposition `<id>` — collect your share if you backed the winning side",
+    "/deploychainlinkoracle `<chainlinkFeedAddress>` — one-time setup: wraps a real Chainlink price feed so oracle-track proposals can check it",
+    "/proposecriteria `<target> <value> <data> <oracle|human> <oracleAddress|switchboard|-> <oracleSelector|-> <targetValue> <min|max> <measurementPeriod> <description>` — propose an action with a fixed, upfront success condition — checked automatically by an oracle, or resolved by a human afterward",
+    "/castapprovalvote `<id> for|against|abstain` — vote on whether this proposal is even worth opening up for betting",
+    "/finalizeapproval `<id>` — close the approval vote and open the betting market if it passed",
+    "/takeposition `<id> yes|no <amount>` — put real money behind whether you think the outcome will succeed or fail",
+    "/execute `<id>` — once betting closes, run the proposal's actual action",
+    "/resolveviaoracle `<id>` — for oracle-track proposals: reads the configured oracle and settles the outcome automatically",
+    "/proposeresolution `<id> success|failure` — for human-track proposals: state what you believe actually happened (backed by a bond)",
+    "/challengeresolution `<id>` — think a proposed resolution is wrong? Dispute it here to force a full vote",
+    "/finalizeunchallenged `<id>` — nobody disputed the resolution within the window? Lock it in",
+    "/castadjudicationvote `<id> success|failure` — vote on the true outcome of a challenged resolution",
+    "/finalizeadjudication `<id>` — close the adjudication vote and settle who was right",
+    "/claimposition `<id>` — collect your payout if you backed the side that actually won",
   ],
   decisionMarkets: [
-    "/proposemarket `<target> <value> <data> <baseSeedAmount> <quoteSeedAmountMON> <description>` — create a proposal, seeding both markets",
-    "/split `<id> base|quote <amount>` — split real tokens into pass/fail conditional tokens, so you have something to trade",
-    "/trade `<id> pass|fail base|quote <amountIn> <minAmountOut>` — back an outcome by trading",
-    "/merge `<id> base|quote <amount>` — reverse a split before resolution",
-    "/finalizeproposal `<id>` — compare both markets' prices and resolve",
-    "/redeem `<id> base|quote` — after resolution, redeem your conditional tokens for real value",
-    "/unwrap `<amount>` — convert WMON you're holding back into native MON (optional - skip if you want to keep WMON)",
-    "/execute `<id>` — execute a passed proposal",
-    "/cancel `<id>` — cancel your own proposal",
-    "/reclaimliquidity `<id>` — recover a finalized proposal's seed liquidity",
+    "/proposemarket `<target> <value> <data> <baseSeedAmount> <quoteSeedAmountMON> <description>` — propose an action and seed two live markets (pass vs. fail) that will decide its fate by price",
+    "/split `<id> base|quote <amount>` — convert real tokens into matched pass/fail conditional tokens, so you have something to actually trade",
+    "/trade `<id> pass|fail base|quote <amountIn> <minAmountOut>` — put your belief where your money is: trade on whichever side you think will win",
+    "/merge `<id> base|quote <amount>` — changed your mind before resolution? Combine matched conditional tokens back into the real asset",
+    "/finalizeproposal `<id>` — once trading closes, compare both markets' prices and lock in the outcome",
+    "/redeem `<id> base|quote` — after resolution, cash in your winning-side conditional tokens for the real thing",
+    "/unwrap `<amount>` — got WMON from a redemption? Convert it back into native MON (optional — only if you want MON specifically)",
+    "/execute `<id>` — run a passed proposal's actual action",
+    "/cancel `<id>` — withdraw your own proposal before execution",
+    "/reclaimliquidity `<id>` — proposer only: get back the liquidity you originally seeded, once resolved",
   ],
 };
 
 bot.command("help", async (ctx) => {
   const lines = [
     "*Setup*",
-    "/createdao `<name> <symbol> <initialSupply> <maxSupply> [model]` — deploy a new DAO and link it here. Models: " + SUPPORTED_MODELS.filter((m) => m !== "board").join(", "),
-    "/createboarddao `<name> <signer1> <signer2> ...` — deploy a Board DAO (no token at all)",
-    "/register `<governance_address> [model]` — link this group to an existing DAO (admin)",
-    "/unregister — unlink this group (admin)",
-    "/deploywelcomedistributor `<amountPerClaim> <distributionCap>` — deploy a fresh welcome distributor for this DAO's token (creator only)",
-    "/deploynftwrapper — deploy this DAO's NFT marketplace wrapper (creator only, one per DAO)",
-    "/setdistributor `<address>` — link a welcome-token distributor (admin)",
+    "/createdao `<name> <symbol> <initialSupply> <maxSupply> [model]` — the main \"spin up a new DAO\" command: deploys a token, treasury, and governance contract, all linked to this chat. Models: " + SUPPORTED_MODELS.filter((m) => m !== "board").join(", "),
+    "/createboarddao `<name> <signer1> <signer2> ...` — for a Board (multisig) DAO specifically — no token at all, so it's a separate command",
+    "/register `<governance_address> [model]` — already have a DAO deployed elsewhere? Link it to this chat instead of creating a new one (admin)",
+    "/unregister — unlink whatever DAO is connected here (admin) — doesn't touch the DAO itself, just this chat's connection to it",
+    "/deploywelcomedistributor `<amountPerClaim> <distributionCap>` — solves \"everyone's tokens are stuck in the operator wallet\": deploys a contract new members can claim from (creator only)",
+    "/deploynftwrapper — one per DAO: deploys the contract that lets this DAO's treasury participate in NFT marketplaces like OpenSea (creator only)",
+    "/setdistributor `<address>` — link an already-deployed welcome distributor so /claim actually works (admin)",
     "",
     "*Your wallet*",
-    "/wallet — show your wallet address (generated automatically, no setup needed)",
-    "/migratewallet — move funds from the old wallet system to the new one, if you have any",
+    "/wallet — show your wallet address (created automatically the first time you need one — no setup required)",
+    "/migratewallet — used this bot back when it derived wallets from a shared seed? Move your funds to the new, individually-encrypted system",
   ];
 
   const daoAddress = getChatDAO(ctx.chat.id);
@@ -286,20 +330,23 @@ bot.command("help", async (ctx) => {
     lines.push(
       "",
       `*DAO info* (this group's DAO uses ${model} governance)`,
-      "/dao — DAO name, token, treasury, config",
+      "/dao — DAO name, token, treasury, and full governance config in one place",
       "/treasury — current treasury balance",
-      "/contribute — get the treasury address to send funds to",
-      "/balance `[address]` — staked voting power (yours, or an address)",
-      "/tokenbalance `[tokenAddressOrTicker] [address|treasury]` — raw token balance. No args: your own balance of this DAO's token. Add an address to check someone else's, or `treasury` for the DAO's own holdings.",
-      "/treasuryassets — every known token balance held by this DAO's treasury",
-      "/registertoken `<ticker> <tokenAddress>` — let `/tip`/`/tokenbalance` use a ticker for any token (creator only)",
-      "/tip `<amount> <recipient> [tokenAddressOrTicker]` — send tokens to someone, from the operator-held supply (creator only). No token given: this DAO's own token. Also accepts any ticker registered with `/registertoken`.",
-      "/send `<amount> <recipient> [tokenAddressOrTicker]` — send tokens YOU hold to someone else, from your own wallet. Anyone can use this; fails if your balance is too low.",
-      "/proposals — list proposals",
-      "/proposal `<id>` — full detail on one proposal"
+      "/contribute — want to donate? Get the treasury's address sent to you privately",
+      "/balance `[address]` — your (or anyone's) staked voting power — different from your raw token balance",
+      "/tokenbalance `[tokenAddressOrTicker] [address|treasury]` — your (or anyone's) actual, spendable token balance. No args: your own balance of this DAO's token. Add `treasury` to check the DAO's own holdings.",
+      "/treasuryassets — every token the treasury holds, all at once, not just this DAO's own",
+      "/registertoken `<ticker> <tokenAddress>` — teach the bot a shortcut so `/tip`/`/send`/`/tokenbalance` can use a ticker instead of a raw address (creator only)",
+      "/tip `<amount> <recipient> [tokenAddressOrTicker]` — distribute tokens from the DAO's own operator-held supply (creator only) — this is how newly-created tokens actually reach people",
+      "/send `<amount> <recipient> [tokenAddressOrTicker]` — send tokens YOU personally hold to anyone, no restrictions — add `MON` at the end to send native currency instead of a token",
+      "/proposals — see every proposal this DAO has, with current status",
+      "/proposal `<id>` — full detail on one specific proposal"
     );
     if (hasToken(model)) {
-      lines.push("/stake `<amount>` — stake tokens to activate voting power", "/unstake `<amount>` — return staked tokens");
+      lines.push(
+        "/stake `<amount>` — convert raw tokens into voting power",
+        "/unstake `<amount>` — convert voting power back into raw, transferable tokens"
+      );
     }
     lines.push("", "*Proposals & actions for this DAO*", ...(MODEL_HELP_BLOCKS[model] ?? ["No commands known for this model."]));
   } else {
@@ -310,32 +357,33 @@ bot.command("help", async (ctx) => {
   if (marketAddress) {
     lines.push(
       "",
-      "*Opportunity Market* (linked to this group)",
-      "/listopportunity `<metadataURI>` — list something people can back",
-      "/deposit `<amount>` — deposit the underlying token",
-      "/back `<opportunityId> <amount>` — confidentially back an opportunity",
-      "/mybalance — decrypt your own balance",
-      "/mybet `<index>` — decrypt one of your own bets",
-      "/reclaimstake — reclaim your stake after resolution",
-      "/computereward — compute your reward once the winning total is revealed",
-      "/withdraw — withdraw your stake",
-      "/withdrawreward — withdraw your reward",
-      "/fundrewardpool `<amount>` — deployer only",
-      "/resolve `<winningOpportunityId>` — deployer only",
-      "/cancelmarket — deployer only",
-      "/revealwinningtotal — deployer only, publicly reveals the aggregate total",
-      "/allbets — deployer only, decrypts every bet at once"
+      "*Opportunity Market* (linked to this group — runs on Sepolia, separate from everything above)",
+      "/listopportunity `<metadataURI>` — add something people can confidentially back",
+      "/deposit `<amount>` — put underlying tokens into the market (this part is public; what you do with it after isn't)",
+      "/back — the core confidential action: run it bare and the bot DMs you to collect your opportunity + amount privately, so neither ever appears in this chat",
+      "/mybalance — check your own confidential balance, sent to you privately",
+      "/mybet `<index>` — decrypt one of your own bets (0 is your first), sent to you privately",
+      "/reclaimstake — get your stake back (after a cancelled market), sent to you privately",
+      "/computereward — work out your share of the reward pool once resolved, sent to you privately",
+      "/withdraw — withdraw your reclaimed stake, sent to you privately",
+      "/withdrawreward — withdraw your computed reward, sent to you privately",
+      "/fundrewardpool `<amount>` — deployer only: funds what backers of the winning opportunity get paid from",
+      "/resolve `<winningOpportunityId>` — deployer only: declares which opportunity turned out to be real",
+      "/cancelmarket — deployer only: cancels the market so everyone can reclaim their stake",
+      "/revealwinningtotal — deployer only, but public on purpose: everyone needs this number to compute their own reward",
+      "/allbets — deployer only: decrypts every single bet at once, sent to you privately",
+      "/analytics — deployer only: total staked and backer count per opportunity, sent to you privately"
     );
   } else {
     lines.push(
       "",
-      "_No Opportunity Market linked - /registermarket `<address>` or /createmarket `<underlyingToken>` to link one, /unregistermarket to unlink._"
+      "_No Opportunity Market linked - /registermarket `<address>` or /createmarket `<underlyingToken>` to link one, /unregistermarket to unlink (deployer only)._"
     );
   }
 
   lines.push("", "*Welcome tokens*", "/claim — claim your welcome tokens");
 
-  await ctx.reply(lines.join("\n"), { parse_mode: "Markdown" });
+  await replyChunked(ctx, lines, { parse_mode: "Markdown" });
 });
 
 /*//////////////////////////////////////////////////////////////
@@ -822,11 +870,7 @@ bot.command("contribute", async (ctx) => {
         await ctx.reply("📬 Sent you the treasury address.");
       }
     } catch (dmErr) {
-      // DM failed (user hasn't started a chat with the bot yet) - fall
-      // back to posting in the group instead of failing silently. The
-      // treasury address isn't sensitive, so this is a safe fallback,
-      // unlike /connect's wallet-linking link.
-      await ctx.reply(message, { parse_mode: "Markdown" });
+      await ctx.reply("Couldn't DM you - please start a chat with me directly first (search for this bot and hit Start), then run `/contribute` again.");
     }
   } catch (err) {
     console.error(err);
@@ -3549,6 +3593,25 @@ bot.command("registermarket", async (ctx) => {
 });
 
 bot.command("unregistermarket", async (ctx) => {
+  const address = getChatMarket(ctx.chat.id);
+  if (!address) {
+    await ctx.reply("No market is linked here.");
+    return;
+  }
+
+  try {
+    const deployer = await opportunityMarket.getDeployer(address);
+    const callerAddress = isWalletStoreConfigured() ? await getUserAddress(ctx.from.id) : null;
+    if (!callerAddress || getAddress(callerAddress) !== getAddress(deployer)) {
+      await ctx.reply("Only this market's deployer can unregister it.");
+      return;
+    }
+  } catch (err) {
+    console.error(err);
+    await ctx.reply("Couldn't confirm you're the deployer - try again in a moment.");
+    return;
+  }
+
   unregisterMarket(ctx.chat.id);
   await ctx.reply("Unlinked. Run /registermarket or /createmarket to link one again.");
 });
@@ -3649,6 +3712,28 @@ bot.command("deposit", async (ctx) => {
   }
 });
 
+/**
+ * The actual bet-placing logic, shared between /back's inline-argument
+ * path (args typed directly in the command) and the DM-reply path
+ * (bare /back in a group, details supplied privately afterward).
+ * `ctx` here may be the original group ctx (inline path) or the DM ctx
+ * (reply path) - either way, replies go wherever `ctx.reply`/
+ * `deliverPrivately` naturally route for that ctx.
+ */
+async function placeBet(ctx, marketAddress, targetId, amount) {
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply("⏳ Encrypting and submitting your bet — this takes a moment…");
+
+  try {
+    await opportunityBack(client, marketAddress, Number(targetId), amount);
+    await deliverPrivately(ctx, statusMsg, "✅ Bet placed confidentially.", "Confirmed your bet.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't place that bet: ${err.shortMessage || err.message}`);
+  }
+}
+
 bot.command("back", async (ctx) => {
   const address = await requireMarket(ctx);
   if (!address) return;
@@ -3657,26 +3742,41 @@ bot.command("back", async (ctx) => {
     return;
   }
 
-  const [targetId, amount] = (ctx.match?.trim() ?? "").split(/\s+/);
+  const raw = ctx.match?.trim() ?? "";
+
+  // Bare /back in a group - the privacy-preserving path. Neither the
+  // request nor the reply ever touches the group; both happen entirely
+  // in DM. This is genuinely different from just DMing the *result*
+  // (deliverPrivately) - typing the opportunity id and amount directly
+  // into a group command would already leak them into that group's
+  // permanent message history, regardless of what the bot does with
+  // them afterward.
+  if (!raw && ctx.chat.type !== "private") {
+    pendingBackRequests.set(ctx.from.id, { marketAddress: address, groupChatId: ctx.chat.id });
+    try {
+      await ctx.api.sendMessage(
+        ctx.from.id,
+        "Reply here with your bet: `<opportunityId> <amount>`\n\nExample: `3 500`",
+        { parse_mode: "Markdown" }
+      );
+      await ctx.reply("📬 Check your DMs to place your bet privately.");
+    } catch (dmErr) {
+      pendingBackRequests.delete(ctx.from.id);
+      await ctx.reply("Couldn't DM you - please start a chat with me directly first (search for this bot and hit Start), then run `/back` again.");
+    }
+    return;
+  }
+
+  const [targetId, amount] = raw.split(/\s+/);
   if (!targetId || !/^\d+$/.test(targetId) || !amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
     await ctx.reply(
-      "Usage: `/back <opportunityId> <amount>` — confidentially backs an opportunity. Both which one and how much stay encrypted on-chain.",
+      "Usage: `/back` (with no arguments, in a group) — the bot will DM you to collect the details privately.\n\nOr `/back <opportunityId> <amount>` directly, if you don't mind those values sitting in this chat's message history.",
       { parse_mode: "Markdown" }
     );
     return;
   }
 
-  const account = await getOrCreateUserAccount(ctx.from.id);
-  const client = opportunityWalletClientFor(account);
-  const statusMsg = await ctx.reply("⏳ Encrypting and submitting your bet — this takes a moment…");
-
-  try {
-    await opportunityBack(client, address, Number(targetId), amount);
-    await deliverPrivately(ctx, statusMsg, "✅ Bet placed confidentially.", "Confirmed your bet.");
-  } catch (err) {
-    console.error(err);
-    await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't place that bet: ${err.shortMessage || err.message}`);
-  }
+  await placeBet(ctx, address, targetId, amount);
 });
 
 bot.command("mybalance", async (ctx) => {
@@ -3759,6 +3859,50 @@ bot.command("allbets", async (ctx) => {
       ctx.chat.id,
       statusMsg.message_id,
       `Couldn't read all bets (this only works if you're the market's deployer): ${err.shortMessage || err.message}`
+    );
+  }
+});
+
+/*//////////////////////////////////////////////////////////////
+                            /analytics
+//////////////////////////////////////////////////////////////*/
+
+bot.command("analytics", async (ctx) => {
+  const address = await requireMarket(ctx);
+  if (!address) return;
+  if (!isWalletStoreConfigured()) {
+    await ctx.reply("Wallets aren't set up on this bot yet - ask an admin.");
+    return;
+  }
+
+  const account = await getOrCreateUserAccount(ctx.from.id);
+  const client = opportunityWalletClientFor(account);
+  const statusMsg = await ctx.reply(
+    "⏳ Computing market analytics — this only works for the market's actual deployer, and needs a signature the first time…"
+  );
+
+  try {
+    const stats = await opportunityGetAnalytics(client, address);
+    const lines = stats.opportunities.map(
+      (o) => `#${o.id} (\`${short(o.lister)}\`): *${o.totalStaked}* staked across *${o.backerCount}* backer(s)`
+    );
+    const message = [
+      `*Market analytics*`,
+      "",
+      `Total bets placed: *${stats.totalBets}*`,
+      `Total staked overall: *${stats.totalStakedOverall}*`,
+      `Unique bettors: *${stats.totalUniqueBettors}*`,
+      "",
+      "*Per opportunity:*",
+      ...(lines.length ? lines : ["No opportunities listed yet."]),
+    ].join("\n");
+    await deliverPrivately(ctx, statusMsg, message, "Sent the market analytics.");
+  } catch (err) {
+    console.error(err);
+    await ctx.api.editMessageText(
+      ctx.chat.id,
+      statusMsg.message_id,
+      `Couldn't compute analytics (this only works if you're the market's deployer): ${err.shortMessage || err.message}`
     );
   }
 });
@@ -3941,6 +4085,30 @@ bot.command("withdrawreward", async (ctx) => {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't withdraw: ${err.shortMessage || err.message}`);
   }
+});
+
+/**
+ * Catches a DM reply to a pending /back request (see the bare-/back
+ * branch above). Only ever acts on private-chat messages from a user
+ * with a genuinely pending request, and only when the message isn't
+ * itself a command - otherwise a stray "/help" typed while a request
+ * happens to be pending would get swallowed as if it were bet details.
+ */
+bot.on("message:text", async (ctx) => {
+  if (ctx.chat.type !== "private") return;
+  if (ctx.message.text.startsWith("/")) return;
+
+  const pending = pendingBackRequests.get(ctx.from.id);
+  if (!pending) return;
+
+  const [targetId, amount] = ctx.message.text.trim().split(/\s+/);
+  if (!targetId || !/^\d+$/.test(targetId) || !amount || Number.isNaN(Number(amount)) || Number(amount) <= 0) {
+    await ctx.reply("That doesn't look right. Reply with: `<opportunityId> <amount>` — e.g. `3 500`", { parse_mode: "Markdown" });
+    return; // keep the pending request open so they can just retry
+  }
+
+  pendingBackRequests.delete(ctx.from.id);
+  await placeBet(ctx, pending.marketAddress, targetId, amount);
 });
 
 process.on("SIGINT", () => {

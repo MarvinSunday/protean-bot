@@ -18,6 +18,12 @@ export function marketContract(address) {
   return { address: getAddress(address), abi: marketAbi };
 }
 
+/** The market's real deployer address - used to gate deployer-only bot actions that never make an on-chain call themselves (so the contract's own onlyDeployer can't protect them). */
+export async function getDeployer(marketAddress) {
+  const gov = marketContract(marketAddress);
+  return opportunityPublicClient.readContract({ ...gov, functionName: "deployer" });
+}
+
 function factoryContract(address) {
   return { address: getAddress(address), abi: factoryAbi };
 }

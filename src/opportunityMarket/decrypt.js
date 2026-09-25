@@ -195,3 +195,58 @@ export async function getAllBets(client, marketAddress) {
     amount: results[amountHandles[i]],
   }));
 }
+
+/**
+ * Deployer-only aggregate stats per opportunity - total staked and
+ * unique backer count, built directly on top of getAllBets (same
+ * decrypt permissions, same deployer-only restriction enforced by the
+ * contract's own ACL, not re-checked here). Opportunity metadata
+ * (lister, metadataURI) is public on-chain and read separately, not
+ * part of the confidential bet data at all.
+ */
+export async function getMarketAnalytics(client, marketAddress) {
+  const gov = marketContract(marketAddress);
+  const bets = await getAllBets(client, marketAddress);
+
+  const opportunityCount = await opportunityPublicClient.readContract({ ...gov, functionName: "opportunityCount" });
+
+  const perOpportunity = new Map();
+  for (let id = 0; id < Number(opportunityCount); id++) {
+    const [lister, metadataURI] = await opportunityPublicClient.readContract({
+      ...gov,
+      functionName: "opportunities",
+      args: [BigInt(id)],
+    });
+    perOpportunity.set(id, { id, lister, metadataURI, totalStaked: 0n, backers: new Set() });
+  }
+
+  let totalStakedOverall = 0n;
+  const allBettors = new Set();
+  for (const bet of bets) {
+    const targetId = Number(bet.target);
+    const entry = perOpportunity.get(targetId);
+    // A bet's target can decrypt to an id outside the current
+    // opportunity list (e.g. one that didn't exist yet, or a
+    // corrupted/zeroed decrypt) - skip rather than crash the whole
+    // report over one bad entry.
+    if (entry) {
+      entry.totalStaked += bet.amount;
+      entry.backers.add(bet.bettor);
+    }
+    totalStakedOverall += bet.amount;
+    allBettors.add(bet.bettor);
+  }
+
+  return {
+    totalBets: bets.length,
+    totalStakedOverall,
+    totalUniqueBettors: allBettors.size,
+    opportunities: [...perOpportunity.values()].map((o) => ({
+      id: o.id,
+      lister: o.lister,
+      metadataURI: o.metadataURI,
+      totalStaked: o.totalStaked,
+      backerCount: o.backers.size,
+    })),
+  };
+}
