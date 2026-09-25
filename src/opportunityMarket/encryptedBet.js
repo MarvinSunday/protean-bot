@@ -35,10 +35,25 @@ let fhevmInstancePromise = null;
  * second, wasteful one - createInstance() is expensive (fetches public
  * keys from Zama's relayer), so this singleton is meant to be shared
  * across every FHE operation in this folder, not just back().
+ *
+ * If createInstance() ever fails - even a single transient hiccup on
+ * Zama's relayer, at startup or any other time - the cached promise
+ * must be cleared, not kept. Without this, a promise that rejects once
+ * stays cached and rejected forever: every future call (checking
+ * `!fhevmInstancePromise`) would see it as already set and reuse the
+ * same broken promise for the rest of the process's life, even long
+ * after Zama's relayer recovers, until the next full restart. This is
+ * a real bug that was found and fixed directly - not a theoretical
+ * concern - because it would turn one transient external failure into
+ * a permanent one for every user, for every FHE operation, until
+ * someone happened to redeploy.
  */
 export function getFhevmInstance() {
   if (!fhevmInstancePromise) {
-    fhevmInstancePromise = createInstance(ZAMA_FHE_CONFIG);
+    fhevmInstancePromise = createInstance(ZAMA_FHE_CONFIG).catch((err) => {
+      fhevmInstancePromise = null;
+      throw err;
+    });
   }
   return fhevmInstancePromise;
 }

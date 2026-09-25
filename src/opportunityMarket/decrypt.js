@@ -23,6 +23,21 @@ import { opportunityPublicClient } from "./config.js";
 
 const DECRYPT_SESSION_DURATION_DAYS = 7;
 
+/**
+ * Without an explicit timeout, userDecrypt defaults to the SDK's own
+ * DEFAULT_GLOBAL_REQUEST_TIMEOUT_MS - confirmed directly in the
+ * installed package's source: a full hour. Observed directly in
+ * production logs: three separate real requests each ran their
+ * internal retry loop for ~30 minutes before finally giving up during
+ * a period of genuine Zama testnet relayer degradation. A user waiting
+ * up to an hour for a single command to fail is a bad experience
+ * regardless of whose infrastructure is at fault - this makes a
+ * failure during an outage surface in a reasonable, bounded time
+ * instead, without changing behavior at all when the relayer is
+ * healthy and responds normally.
+ */
+const USER_DECRYPT_TIMEOUT_MS = 60_000;
+
 // Map<`${userAddress}:${marketAddress}`, session>
 const decryptSessions = new Map();
 
@@ -94,7 +109,8 @@ export async function getBalance(client, marketAddress) {
     [marketAddress],
     userAddress,
     session.startTimestamp,
-    session.durationDays
+    session.durationDays,
+    { timeout: USER_DECRYPT_TIMEOUT_MS }
   );
 
   return results[handle];
@@ -134,7 +150,8 @@ export async function getBet(client, marketAddress, betIndex) {
     [marketAddress],
     userAddress,
     session.startTimestamp,
-    session.durationDays
+    session.durationDays,
+    { timeout: USER_DECRYPT_TIMEOUT_MS }
   );
 
   return {
@@ -186,7 +203,8 @@ export async function getAllBets(client, marketAddress) {
     [marketAddress],
     userAddress,
     session.startTimestamp,
-    session.durationDays
+    session.durationDays,
+    { timeout: USER_DECRYPT_TIMEOUT_MS }
   );
 
   return bettors.map((bettor, i) => ({
