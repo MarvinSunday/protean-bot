@@ -1,6 +1,6 @@
 import { Bot } from "grammy";
 import { run, sequentialize } from "@grammyjs/runner";
-import { isAddress, getAddress, parseEther } from "viem";
+import { isAddress, getAddress, parseEther, formatUnits } from "viem";
 import { BOT_TOKEN, monadTestnet, publicClient, SORTITION_RANDOMNESS_SOURCE, SWITCHBOARD_ORACLE_ADAPTER, walletClient } from "./config.js";
 import {
   registerChat,
@@ -3814,7 +3814,8 @@ bot.command("mybalance", async (ctx) => {
 
   try {
     const balance = await opportunityGetBalance(client, address);
-    await deliverPrivately(ctx, statusMsg, `Your confidential balance: *${balance}*`, "Sent your balance.");
+    const decimals = await opportunityMarket.getUnderlyingDecimals(address);
+    await deliverPrivately(ctx, statusMsg, `Your confidential balance: *${formatUnits(balance, decimals)}*`, "Sent your balance.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't read your balance: ${err.shortMessage || err.message}`);
@@ -3841,7 +3842,8 @@ bot.command("mybet", async (ctx) => {
 
   try {
     const { target, amount } = await opportunityGetBet(client, address, index);
-    await deliverPrivately(ctx, statusMsg, `Bet #${index}: opportunity *${target}*, amount *${amount}*`, "Sent your bet details.");
+    const decimals = await opportunityMarket.getUnderlyingDecimals(address);
+    await deliverPrivately(ctx, statusMsg, `Bet #${index}: opportunity *${target}*, amount *${formatUnits(amount, decimals)}*`, "Sent your bet details.");
   } catch (err) {
     console.error(err);
     await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, `Couldn't read that bet: ${err.shortMessage || err.message}`);
@@ -3872,7 +3874,8 @@ bot.command("allbets", async (ctx) => {
       await ctx.api.editMessageText(ctx.chat.id, statusMsg.message_id, "No bets placed yet.");
       return;
     }
-    const lines = bets.map((b, i) => `${i + 1}. \`${short(b.bettor)}\` → opportunity *${b.target}*, amount *${b.amount}*`);
+    const decimals = await opportunityMarket.getUnderlyingDecimals(address);
+    const lines = bets.map((b, i) => `${i + 1}. \`${short(b.bettor)}\` → opportunity *${b.target}*, amount *${formatUnits(b.amount, decimals)}*`);
     await deliverPrivately(ctx, statusMsg, `*All bets* (${bets.length}):\n${lines.join("\n")}`, "Sent the full bet list.");
   } catch (err) {
     console.error(err);
@@ -3904,14 +3907,15 @@ bot.command("analytics", async (ctx) => {
 
   try {
     const stats = await opportunityGetAnalytics(client, address);
+    const decimals = await opportunityMarket.getUnderlyingDecimals(address);
     const lines = stats.opportunities.map(
-      (o) => `#${o.id} (\`${short(o.lister)}\`): *${o.totalStaked}* staked across *${o.backerCount}* backer(s)`
+      (o) => `#${o.id} (\`${short(o.lister)}\`): *${formatUnits(o.totalStaked, decimals)}* staked across *${o.backerCount}* backer(s)`
     );
     const message = [
       `*Market analytics*`,
       "",
       `Total bets placed: *${stats.totalBets}*`,
-      `Total staked overall: *${stats.totalStakedOverall}*`,
+      `Total staked overall: *${formatUnits(stats.totalStakedOverall, decimals)}*`,
       `Unique bettors: *${stats.totalUniqueBettors}*`,
       "",
       "*Per opportunity:*",

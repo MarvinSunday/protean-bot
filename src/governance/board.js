@@ -79,11 +79,24 @@ export async function queue() {
 export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
   const gov = contractFor(governanceAddress);
 
+  // Monad charges for the full gas_limit specified, not just gas
+  // actually consumed (confirmed directly from Monad's own docs -
+  // genuinely different from Ethereum, where an overestimated limit
+  // is free since only gas_used gets charged). Left to auto-estimate,
+  // observed directly in production: a real executeTransaction call
+  // whose actual work only needed ~150,000 gas got estimated at
+  // ~9,943,397 - just over Monad's documented 8,100,000 low/high gas
+  // pool boundary, consistent with the estimate falling into the
+  // high-gas pool - and the full inflated amount was genuinely
+  // charged, costing roughly 1 extra MON for what should have cost a
+  // small fraction of that. A fixed, modest explicit limit avoids
+  // this entirely for a call whose real cost is fairly constant.
   const hash = await client.writeContract({
     ...gov,
     functionName: "executeTransaction",
     args: [BigInt(proposalId)],
     value: parseEther(String(valueWhole)),
+    gas: 400_000n,
   });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };

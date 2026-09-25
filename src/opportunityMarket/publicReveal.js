@@ -3,6 +3,38 @@ import { getFhevmInstance } from "./encryptedBet.js";
 import { opportunityPublicClient } from "./config.js";
 
 /**
+ * publicDecrypt requires the target handle to have been granted public
+ * decryptability via FHE.makePubliclyDecryptable() on-chain - but that
+ * grant is registered by Zama's relayer asynchronously, off-chain,
+ * separately from the transaction that made it being mined.
+ * waitForTransactionReceipt only confirms the on-chain half; it says
+ * nothing about whether the relayer has caught up yet. Observed
+ * directly in production: a handle correctly, freshly granted in the
+ * very same transaction still failed with "Handle ... is not allowed
+ * for public decryption" moments later - the exact same class of race
+ * already found and fixed for gas top-ups elsewhere in this bot, here
+ * showing up as a hard ACL rejection rather than a retryable gateway
+ * timeout, so it needs its own short, bounded retry rather than
+ * relying on the SDK's own internal retry behavior.
+ */
+async function publicDecryptWithRetry(instance, handle) {
+  const MAX_ATTEMPTS = 6;
+  const DELAY_MS = 3000;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      return await instance.publicDecrypt([handle]);
+    } catch (err) {
+      lastErr = err;
+      const isAclPropagationDelay = err?.name === "ACLPublicDecryptionError" || /not allowed for public decryption/i.test(err?.message ?? "");
+      if (!isAclPropagationDelay || attempt === MAX_ATTEMPTS) throw err;
+      await new Promise((resolve) => setTimeout(resolve, DELAY_MS));
+    }
+  }
+  throw lastErr;
+}
+
+/**
  * Real implementation of the public-decrypt flow that
  * completeWinningTotalReveal()/completeWithdrawal() need. Genuinely
  * different from decrypt.js's userDecrypt flow, despite superficial
@@ -33,10 +65,10 @@ export async function revealAndCompleteWinningTotal(client, marketAddress) {
   const { handle } = await finalizeWinningTotal(client, marketAddress);
 
   const instance = await getFhevmInstance();
-  const { abiEncodedClearValues, decryptionProof } = await instance.publicDecrypt([handle]);
+  const { abiEncodedClearValues, decryptionProof } = await publicDecryptWithRetry(instance, handle);
 
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "completeWinningTotalReveal",
     args: [abiEncodedClearValues, decryptionProof],
@@ -55,10 +87,10 @@ export async function revealAndCompleteWithdrawal(client, marketAddress, kind) {
   const { handle } = await requestFn(client, marketAddress);
 
   const instance = await getFhevmInstance();
-  const { abiEncodedClearValues, decryptionProof } = await instance.publicDecrypt([handle]);
+  const { abiEncodedClearValues, decryptionProof } = await publicDecryptWithRetry(instance, handle);
 
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "completeWithdrawal",
     args: [handle, abiEncodedClearValues, decryptionProof],
