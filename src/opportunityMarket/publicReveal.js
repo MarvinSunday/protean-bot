@@ -1,6 +1,6 @@
 import { marketContract, finalizeWinningTotal, requestWithdrawal, requestRewardWithdrawal } from "./market.js";
 import { getFhevmInstance } from "./encryptedBet.js";
-import { opportunityPublicClient } from "./config.js";
+import { opportunityPublicClient, writeWithGasBuffer } from "./config.js";
 
 /**
  * publicDecrypt requires the target handle to have been granted public
@@ -18,8 +18,22 @@ import { opportunityPublicClient } from "./config.js";
  * relying on the SDK's own internal retry behavior.
  */
 async function publicDecryptWithRetry(instance, handle) {
-  const MAX_ATTEMPTS = 6;
-  const DELAY_MS = 3000;
+  // Observed directly in production: the previous 6-attempt/3-second
+  // window (max ~18s) was genuinely too short - two separate real
+  // attempts both exhausted it without the grant propagating in time.
+  // Re-running the command doesn't help either: finalizeWinningTotal()
+  // creates a brand new encrypted handle on every call (FHE ciphertexts
+  // are never reused, even for an identical underlying value), so a
+  // retry-by-rerunning approach resets the propagation clock to zero on
+  // a different handle each time rather than giving the same one more
+  // time. A much longer single-invocation window is the actual fix -
+  // 40 attempts at 5s apart, up to ~200s worst case, chosen to
+  // comfortably outlast a normal propagation delay without waiting as
+  // long as the multi-hour gateway outages seen elsewhere (a
+  // genuinely different failure mode, already handled separately by
+  // decrypt.js's own 60s timeout).
+  const MAX_ATTEMPTS = 40;
+  const DELAY_MS = 5000;
   let lastErr;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
     try {

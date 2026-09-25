@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES, writeWithGasBuffer } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -50,7 +50,7 @@ function contractFor(address) {
 export async function propose(client, governanceAddress, actions, metadataURI) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "proposeTransaction",
     args: [actions, metadataURI],
@@ -79,18 +79,19 @@ export async function queue() {
 export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
   const gov = contractFor(governanceAddress);
 
-  // Monad charges for the full gas_limit specified, not just gas
-  // actually consumed (confirmed directly from Monad's own docs -
-  // genuinely different from Ethereum, where an overestimated limit
-  // is free since only gas_used gets charged). Left to auto-estimate,
-  // observed directly in production: a real executeTransaction call
-  // whose actual work only needed ~150,000 gas got estimated at
-  // ~9,943,397 - just over Monad's documented 8,100,000 low/high gas
-  // pool boundary, consistent with the estimate falling into the
-  // high-gas pool - and the full inflated amount was genuinely
-  // charged, costing roughly 1 extra MON for what should have cost a
-  // small fraction of that. A fixed, modest explicit limit avoids
-  // this entirely for a call whose real cost is fairly constant.
+  // Deliberately NOT using writeWithGasBuffer here, unlike every other
+  // call in this file - that helper still calls estimateContractGas
+  // internally, which hits the exact same eth_estimateGas RPC method
+  // that returned ~9,943,397 gas for this specific call in production
+  // (confirmed via the actual receipt), against a real, traced need of
+  // only ~150,347 gas. Buffering on top of an estimate that may itself
+  // already be wrong (Monad's dual-pool routing is a documented,
+  // plausible cause) risks compounding the problem rather than fixing
+  // it. A fixed, modest limit based on the real measured need sidesteps
+  // estimateGas entirely for this proven case - matching Monad's own
+  // guidance to set gas explicitly when it's fairly constant, since
+  // executeTransaction's call depth (governance clone -> implementation
+  // -> treasury clone -> implementation -> recipient) doesn't vary.
   const hash = await client.writeContract({
     ...gov,
     functionName: "executeTransaction",
@@ -105,7 +106,7 @@ export async function execute(client, governanceAddress, proposalId, valueWhole 
 export async function cancel(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "cancelProposal",
     args: [BigInt(proposalId)],
@@ -151,7 +152,7 @@ export async function getProposal(governanceAddress, proposalId) {
 /** Confirms a proposal - only callable by a current signer. */
 export async function confirm(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "confirmTransaction", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "confirmTransaction", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -164,7 +165,7 @@ export async function confirm(client, governanceAddress, proposalId) {
  */
 export async function revokeConfirmation(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "revokeConfirmation",
     args: [BigInt(proposalId)],
@@ -238,7 +239,7 @@ export async function createDAO(name, initialSigners) {
 
   const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
 
-  const hash = await walletClient.writeContract({
+  const hash = await writeWithGasBuffer(walletClient, {
     ...factory,
     functionName: "createDAO",
     args: [name, config, initialSigners.map((s) => getAddress(s.toLowerCase()))],

@@ -57,3 +57,19 @@ export const ZAMA_FHE_CONFIG = {
 export function isOpportunityMarketConfigured() {
   return Boolean(SEPOLIA_RPC_URL);
 }
+
+/**
+ * Sepolia-side equivalent of the main config.js's writeWithGasBuffer -
+ * can't reuse that one directly, since it's bound to Monad's
+ * publicClient, not this file's own opportunityPublicClient. Applied
+ * here mainly for consistency with the rest of the bot; Sepolia (a
+ * standard Ethereum testnet) doesn't share Monad's charge-for-the-
+ * full-gas_limit behavior, so the risk this addresses on the Monad
+ * side is largely theoretical here - a real, per-call estimate plus a
+ * modest buffer is still a reasonable default regardless of chain.
+ */
+export async function writeWithGasBuffer(client, contractParams) {
+  const estimate = await opportunityPublicClient.estimateContractGas({ ...contractParams, account: client.account });
+  const gas = (estimate * 150n) / 100n;
+  return client.writeContract({ ...contractParams, gas });
+}

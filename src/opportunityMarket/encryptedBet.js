@@ -1,6 +1,6 @@
 import { createInstance } from "@zama-fhe/relayer-sdk/node";
 import { bytesToHex, parseUnits } from "viem";
-import { ZAMA_FHE_CONFIG, opportunityPublicClient } from "./config.js";
+import { ZAMA_FHE_CONFIG, opportunityPublicClient, writeWithGasBuffer } from "./config.js";
 import { marketContract, getUnderlyingDecimals } from "./market.js";
 
 /**
@@ -107,7 +107,7 @@ export async function back(client, marketAddress, targetOpportunityId, amountWho
   );
 
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "back",
     args: [targetHandle, targetProof, amountHandle, amountProof],

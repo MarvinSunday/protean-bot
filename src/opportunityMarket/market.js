@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseUnits } from "viem";
-import { opportunityPublicClient } from "./config.js";
+import { opportunityPublicClient, writeWithGasBuffer } from "./config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,7 +51,7 @@ function factoryContract(address) {
 export async function createMarket(client, factoryAddress, underlyingTokenAddress) {
   const factory = factoryContract(factoryAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...factory,
     functionName: "createMarket",
     args: [getAddress(underlyingTokenAddress)],
@@ -71,7 +71,7 @@ export async function createMarket(client, factoryAddress, underlyingTokenAddres
 /** Lists a new opportunity for people to back. Metadata only, no funds involved. */
 export async function listOpportunity(client, marketAddress, metadataURI) {
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "listOpportunity", args: [metadataURI] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "listOpportunity", args: [metadataURI] });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
 
   const id = await opportunityPublicClient.readContract({ ...gov, functionName: "opportunityCount" }).catch(() => null);
@@ -106,7 +106,7 @@ async function ensureAllowance(client, tokenAddress, spenderAddress, amountRaw) 
   });
   if (currentAllowance >= amountRaw) return;
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...token,
     functionName: "approve",
     args: [getAddress(spenderAddress), amountRaw],
@@ -152,7 +152,7 @@ export async function deposit(client, marketAddress, amountWhole) {
   const tokenAddress = await getUnderlyingTokenAddress(marketAddress);
   await ensureAllowance(client, tokenAddress, marketAddress, amount);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "deposit",
     args: [amount],
@@ -170,7 +170,7 @@ export async function fundRewardPool(client, marketAddress, amountWhole) {
   const tokenAddress = await getUnderlyingTokenAddress(marketAddress);
   await ensureAllowance(client, tokenAddress, marketAddress, amount);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "fundRewardPool",
     args: [amount],
@@ -182,7 +182,7 @@ export async function fundRewardPool(client, marketAddress, amountWhole) {
 /** Deployer-only: cancels the market before resolution, refunding the reward pool. */
 export async function cancelMarket(client, marketAddress) {
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "cancelMarket", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "cancelMarket", args: [] });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -190,7 +190,7 @@ export async function cancelMarket(client, marketAddress) {
 /** Deployer-only: declares which opportunity turned out to be real. */
 export async function resolve(client, marketAddress, winningOpportunityId) {
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "resolve",
     args: [BigInt(winningOpportunityId)],
@@ -202,7 +202,7 @@ export async function resolve(client, marketAddress, winningOpportunityId) {
 /** Reclaims a backer's original stake after resolution or cancellation - the stake itself, not any reward. */
 export async function reclaimStake(client, marketAddress) {
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "reclaimStake", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "reclaimStake", args: [] });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -226,7 +226,7 @@ export async function finalizeWinningTotal(client, marketAddress) {
     functionName: "finalizeWinningTotal",
     account: client.account,
   });
-  const hash = await client.writeContract({ ...gov, functionName: "finalizeWinningTotal", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "finalizeWinningTotal", args: [] });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash, handle };
 }
@@ -239,7 +239,7 @@ export async function finalizeWinningTotal(client, marketAddress) {
  */
 export async function completeWinningTotalReveal(client, marketAddress, abiEncodedCleartext, decryptionProof) {
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "completeWinningTotalReveal",
     args: [abiEncodedCleartext, decryptionProof],
@@ -251,7 +251,7 @@ export async function completeWinningTotalReveal(client, marketAddress, abiEncod
 /** Computes the caller's own reward, once the winning total has been finalized. */
 export async function computeReward(client, marketAddress) {
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "computeReward", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "computeReward", args: [] });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -264,7 +264,7 @@ export async function requestWithdrawal(client, marketAddress) {
     functionName: "requestWithdrawal",
     account: client.account,
   });
-  const hash = await client.writeContract({ ...gov, functionName: "requestWithdrawal", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "requestWithdrawal", args: [] });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash, handle };
 }
@@ -277,7 +277,7 @@ export async function requestRewardWithdrawal(client, marketAddress) {
     functionName: "requestRewardWithdrawal",
     account: client.account,
   });
-  const hash = await client.writeContract({ ...gov, functionName: "requestRewardWithdrawal", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "requestRewardWithdrawal", args: [] });
   await opportunityPublicClient.waitForTransactionReceipt({ hash });
   return { hash, handle };
 }
@@ -285,7 +285,7 @@ export async function requestRewardWithdrawal(client, marketAddress) {
 /** Completes a pending withdrawal using the cleartext and proof for `handle`. Plain bytes, same reasoning as completeWinningTotalReveal. */
 export async function completeWithdrawal(client, marketAddress, handle, abiEncodedCleartext, decryptionProof) {
   const gov = marketContract(marketAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "completeWithdrawal",
     args: [handle, abiEncodedCleartext, decryptionProof],
