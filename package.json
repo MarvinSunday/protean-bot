@@ -5,11 +5,11 @@
   "type": "module",
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js",
-    "keeper:sortition": "node src/keepers/sortitionKeeper.js"
+    "dev": "node --watch src/index.js"
   },
   "dependencies": {
     "@aws-sdk/client-kms": "^3.1131.0",
+    "@grammyjs/runner": "^2.0.3",
     "@supabase/supabase-js": "^2.116.0",
     "@switchboard-xyz/common": "^5.8.5",
     "@switchboard-xyz/on-demand-solidity": "^1.1.0",

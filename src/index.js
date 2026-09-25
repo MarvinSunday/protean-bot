@@ -1,4 +1,5 @@
 import { Bot } from "grammy";
+import { run, sequentialize } from "@grammyjs/runner";
 import { isAddress, getAddress, parseEther } from "viem";
 import { BOT_TOKEN, monadTestnet, publicClient, SORTITION_RANDOMNESS_SOURCE, SWITCHBOARD_ORACLE_ADAPTER, walletClient } from "./config.js";
 import {
@@ -67,6 +68,26 @@ import { getBalance as opportunityGetBalance, getBet as opportunityGetBet, getAl
 import { revealAndCompleteWinningTotal, revealAndCompleteWithdrawal } from "./opportunityMarket/publicReveal.js";
 
 const bot = new Bot(BOT_TOKEN);
+
+/**
+ * Without this, grammY's default bot.start() processes every single
+ * update - from every chat, every user - strictly one at a time. A
+ * slow operation (FHE encryption + gateway round-trip + on-chain
+ * confirmation, routinely the slowest thing this bot does) blocks
+ * every other user's command globally until it finishes - observed
+ * directly: a second user's command appeared to "just pause" while
+ * an unrelated Opportunity Market action was still running.
+ *
+ * sequentialize(), keyed per Telegram user id, is what makes it safe
+ * to then run updates concurrently via the runner below: different
+ * users' commands can now genuinely run at the same time, while each
+ * individual user's own updates still process in strict order - this
+ * matters because pendingBackRequests (the /back DM flow) and each
+ * user's own wallet nonce sequencing are both per-user shared state
+ * that would otherwise race against a second update from that same
+ * user arriving before the first one finishes.
+ */
+bot.use(sequentialize((ctx) => ctx.from?.id?.toString()));
 
 /**
  * Tracks users mid-way through a privacy-preserving /back flow: they
@@ -3485,7 +3506,7 @@ bot.catch((err) => {
   }
 });
 
-bot.start();
+run(bot);
 
 /*//////////////////////////////////////////////////////////////
                     WELCOME DISTRIBUTION
