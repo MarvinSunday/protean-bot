@@ -229,7 +229,13 @@ export async function getMarketAnalytics(client, marketAddress) {
   const opportunityCount = await opportunityPublicClient.readContract({ ...gov, functionName: "opportunityCount" });
 
   const perOpportunity = new Map();
-  for (let id = 0; id < Number(opportunityCount); id++) {
+  // Opportunity IDs start at 1, not 0 - confirmed directly from the
+  // real contract: listOpportunity() does `id = ++opportunityCount`
+  // (pre-increment), so opportunityCount is genuinely the count of
+  // real opportunities, and valid ids run 1..opportunityCount
+  // inclusive. Looping from 0 would both fabricate a never-real #0
+  // slot and silently skip the actual last opportunity.
+  for (let id = 1; id <= Number(opportunityCount); id++) {
     const [lister, metadataURI] = await opportunityPublicClient.readContract({
       ...gov,
       functionName: "opportunities",
