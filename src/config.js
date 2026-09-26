@@ -109,3 +109,31 @@ if (!BOT_TOKEN) {
   console.error("Missing TELEGRAM_BOT_TOKEN - copy .env.example to .env and fill it in.");
   process.exit(1);
 }
+
+/**
+ * Estimates real gas for a contract write, applies a modest, controlled
+ * buffer, then submits with that as an EXPLICIT limit - rather than
+ * letting the write auto-estimate on its own.
+ *
+ * Confirmed directly from Monad's own docs, and directly against a real
+ * transaction: Monad charges for the full gas_limit specified, not just
+ * gas actually consumed - genuinely different from Ethereum, where an
+ * overestimated limit costs nothing extra. Left to viem's own default
+ * estimation, a real Board executeTransaction call whose traced,
+ * actual work only needed ~150,000 gas was estimated at ~9.94 million -
+ * just over Monad's documented 8.1M low/high gas-pool boundary,
+ * consistent with the request falling into the high-gas pool - and the
+ * full, inflated amount was genuinely charged: roughly 1 extra MON for
+ * what should have cost a small fraction of that.
+ *
+ * A 50% buffer over a real, per-call estimate (Monad's own docs use
+ * this exact multiple as a starting point before a system has enough
+ * production history to tighten it) stays comfortably clear of state
+ * changing between estimation and execution, without ever risking the
+ * runaway inflation this bot has now observed directly in production.
+ */
+export async function writeWithGasBuffer(client, contractParams) {
+  const estimate = await publicClient.estimateContractGas({ ...contractParams, account: client.account });
+  const gas = (estimate * 150n) / 100n;
+  return client.writeContract({ ...contractParams, gas });
+}

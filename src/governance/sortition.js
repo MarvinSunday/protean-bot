@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES, writeWithGasBuffer } from "../config.js";
 import { CrossbarClient } from "@switchboard-xyz/common";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -100,7 +100,7 @@ function contractFor(address) {
 export async function propose(client, governanceAddress, actions, metadataURI) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "proposeCouncilAction",
     args: [actions, metadataURI],
@@ -121,7 +121,7 @@ export async function propose(client, governanceAddress, actions, metadataURI) {
 export async function vote(client, governanceAddress, proposalId, support, _reason) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "castCouncilVote",
     args: [BigInt(proposalId), support],
@@ -133,7 +133,7 @@ export async function vote(client, governanceAddress, proposalId, support, _reas
 export async function queue(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "queueProposal",
     args: [BigInt(proposalId)],
@@ -145,7 +145,7 @@ export async function queue(client, governanceAddress, proposalId) {
 export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "executeProposal",
     args: [BigInt(proposalId)],
@@ -158,7 +158,7 @@ export async function execute(client, governanceAddress, proposalId, valueWhole 
 export async function cancel(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "cancelProposal",
     args: [BigInt(proposalId)],
@@ -196,7 +196,7 @@ export async function getProposal(governanceAddress, proposalId) {
 /** Opts the caller into the eligible pool for future sortition draws. */
 export async function registerEligible(client, governanceAddress) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "registerEligible", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "registerEligible", args: [] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -208,7 +208,7 @@ export async function registerEligible(client, governanceAddress) {
  */
 export async function withdrawEligibility(client, governanceAddress) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "withdrawEligibility", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "withdrawEligibility", args: [] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -224,7 +224,7 @@ export async function withdrawEligibility(client, governanceAddress) {
  */
 export async function startSortition(client, governanceAddress) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "startSortition", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "startSortition", args: [] });
   await publicClient.waitForTransactionReceipt({ hash });
 
   const round = await publicClient.readContract({ ...gov, functionName: "sortitionRound" });
@@ -240,7 +240,7 @@ export async function startSortition(client, governanceAddress) {
  */
 export async function finalizeSortition(client, governanceAddress) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "finalizeSortition", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "finalizeSortition", args: [] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -304,7 +304,7 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
 
   const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
 
-  const hash = await walletClient.writeContract({
+  const hash = await writeWithGasBuffer(walletClient, {
     ...factory,
     functionName: "createDAO",
     args: [
@@ -404,7 +404,7 @@ export async function settleSortitionRandomness(client, governanceAddress) {
     oracle: randomness.oracle,
   });
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...switchboardContract,
     functionName: "settleRandomness",
     args: [encoded],

@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createWalletClient, http, formatEther, parseEther, getAddress, isAddress } from "viem";
-import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESS, monadTestnet } from "./config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESS, monadTestnet, writeWithGasBuffer } from "./config.js";
 import { recordGasTopup, isWalletStoreConfigured } from "./walletStore.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -141,7 +141,7 @@ export async function distributeWelcomeGrant(distributorAddress, memberAddress) 
     throw new Error("OPERATOR_PRIVATE_KEY is not configured on this bot instance");
   }
 
-  const hash = await walletClient.writeContract({
+  const hash = await writeWithGasBuffer(walletClient, {
     address: getAddress(distributorAddress),
     abi: abis.WelcomeDistributor,
     functionName: "distribute",
@@ -182,7 +182,7 @@ export async function createDaoOnChain(name, symbol, initialSupplyWhole, maxSupp
     throw new Error("FACTORY_ADDRESS is not configured on this bot instance");
   }
 
-  const hash = await walletClient.writeContract({
+  const hash = await writeWithGasBuffer(walletClient, {
     address: getAddress(FACTORY_ADDRESS),
     abi: abis.DAOFactory,
     functionName: "createDAO",
@@ -335,7 +335,7 @@ export async function stakeTokens(account, stakingTokenAddress, amountWhole) {
     functionName: "underlying",
   });
 
-  const approveHash = await client.writeContract({
+  const approveHash = await writeWithGasBuffer(client, {
     address: underlyingAddress,
     abi: abis.GovernanceToken,
     functionName: "approve",
@@ -343,7 +343,7 @@ export async function stakeTokens(account, stakingTokenAddress, amountWhole) {
   });
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
 
-  const stakeHash = await client.writeContract({
+  const stakeHash = await writeWithGasBuffer(client, {
     address: getAddress(stakingTokenAddress),
     abi: abis.StakedGovernanceToken,
     functionName: "stake",
@@ -362,7 +362,7 @@ export async function proposeOnChain(account, governanceAddress, target, value, 
 
   const actions = [{ target: getAddress(target), value: parseEther(String(value || "0")), data: data || "0x" }];
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     address: getAddress(governanceAddress),
     abi: abis.Governance,
     functionName: "propose",
@@ -387,7 +387,7 @@ export async function proposeOnChain(account, governanceAddress, target, value, 
 export async function castVoteOnChain(account, governanceAddress, proposalId, support) {
   const client = walletClientFor(account);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     address: getAddress(governanceAddress),
     abi: abis.Governance,
     functionName: "castVote",
@@ -455,7 +455,7 @@ export async function tipTokens(client, tokenAddress, recipientAddress, amountWh
   const token = underlyingToken(tokenAddress);
   const amount = parseEther(String(amountWhole));
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...token,
     functionName: "transfer",
     args: [getAddress(recipientAddress), amount],

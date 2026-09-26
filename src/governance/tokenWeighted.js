@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient } from "../config.js";
+import { publicClient, writeWithGasBuffer } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -26,7 +26,7 @@ function contractFor(address) {
 export async function propose(client, governanceAddress, actions, metadataURI) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "propose",
     args: [actions, metadataURI],
@@ -65,7 +65,7 @@ export async function vote(client, governanceAddress, proposalId, support, reaso
     account: client.account,
   });
 
-  const hash = await client.writeContract({ ...gov, functionName, args });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName, args });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash, weight };
 }
@@ -73,7 +73,7 @@ export async function vote(client, governanceAddress, proposalId, support, reaso
 export async function queue(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "queueProposal",
     args: [BigInt(proposalId)],
@@ -90,7 +90,7 @@ export async function queue(client, governanceAddress, proposalId) {
 export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "executeProposal",
     args: [BigInt(proposalId)],
@@ -103,7 +103,7 @@ export async function execute(client, governanceAddress, proposalId, valueWhole 
 export async function cancel(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "cancelProposal",
     args: [BigInt(proposalId)],

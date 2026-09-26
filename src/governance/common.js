@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { createWalletClient, http, getAddress, parseEther } from "viem";
-import { publicClient, monadTestnet } from "../config.js";
+import { publicClient, monadTestnet, writeWithGasBuffer } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -143,7 +143,7 @@ export async function stakeTokens(client, stakingTokenAddress, amountWhole) {
     functionName: "underlying",
   });
 
-  const approveHash = await client.writeContract({
+  const approveHash = await writeWithGasBuffer(client, {
     address: underlyingAddress,
     abi: abis.GovernanceToken,
     functionName: "approve",
@@ -151,7 +151,7 @@ export async function stakeTokens(client, stakingTokenAddress, amountWhole) {
   });
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
 
-  const stakeHash = await client.writeContract({
+  const stakeHash = await writeWithGasBuffer(client, {
     address: getAddress(stakingTokenAddress),
     abi: abis.StakedGovernanceToken,
     functionName: "stake",
@@ -169,7 +169,7 @@ export async function stakeTokens(client, stakingTokenAddress, amountWhole) {
 export async function unstakeTokens(client, stakingTokenAddress, amountWhole) {
   const amount = parseEther(String(amountWhole));
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     address: getAddress(stakingTokenAddress),
     abi: abis.StakedGovernanceToken,
     functionName: "unstake",

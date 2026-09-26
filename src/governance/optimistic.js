@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES, writeWithGasBuffer } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -51,7 +51,7 @@ function contractFor(address) {
 export async function propose(client, governanceAddress, actions, metadataURI) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "propose",
     args: [actions, metadataURI],
@@ -73,7 +73,7 @@ export async function propose(client, governanceAddress, actions, metadataURI) {
 export async function vote(client, governanceAddress, proposalId, support, _reason) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "castVote",
     args: [BigInt(proposalId), support],
@@ -94,7 +94,7 @@ export async function queue(client, governanceAddress, proposalId) {
   const proposal = await publicClient.readContract({ ...gov, functionName: "getProposal", args: [BigInt(proposalId)] });
   const functionName = proposal.challenged ? "finalizeChallenge" : "finalizeUnchallenged";
 
-  const hash = await client.writeContract({ ...gov, functionName, args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName, args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash, via: functionName };
 }
@@ -102,7 +102,7 @@ export async function queue(client, governanceAddress, proposalId) {
 export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "executeProposal",
     args: [BigInt(proposalId)],
@@ -115,7 +115,7 @@ export async function execute(client, governanceAddress, proposalId, valueWhole 
 export async function cancel(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "cancelProposal",
     args: [BigInt(proposalId)],
@@ -179,7 +179,7 @@ export async function getProposal(governanceAddress, proposalId) {
  */
 export async function challenge(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "challenge", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "challenge", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -211,7 +211,7 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
 
   const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
 
-  const hash = await walletClient.writeContract({
+  const hash = await writeWithGasBuffer(walletClient, {
     ...factory,
     functionName: "createDAO",
     args: [name, symbol, parseEther(String(initialSupplyWhole)), parseEther(String(maxSupplyWhole)), DEFAULT_CONFIG],

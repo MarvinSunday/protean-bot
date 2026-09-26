@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther } from "viem";
-import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES, writeWithGasBuffer } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -92,7 +92,7 @@ export async function queue() {
 export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "executeProposal",
     args: [BigInt(proposalId)],
@@ -105,7 +105,7 @@ export async function execute(client, governanceAddress, proposalId, valueWhole 
 export async function cancel(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "cancelProposal",
     args: [BigInt(proposalId)],
@@ -164,7 +164,7 @@ export async function proposeWithSeed(
 ) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "propose",
     args: [actions, metadataURI, parseEther(String(baseSeedAmountWhole))],
@@ -190,7 +190,7 @@ export async function proposeWithSeed(
 export async function trade(client, governanceAddress, proposalId, market, sideIn, amountInWhole, minAmountOutWhole) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "trade",
     args: [BigInt(proposalId), market, sideIn, parseEther(String(amountInWhole)), parseEther(String(minAmountOutWhole))],
@@ -202,7 +202,7 @@ export async function trade(client, governanceAddress, proposalId, market, sideI
 /** Reads both markets' TWAP, compares them against the configured threshold, and resolves both vaults. Permissionless, callable by anyone once trading has closed. */
 export async function finalizeProposal(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "finalizeProposal", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "finalizeProposal", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -215,7 +215,7 @@ export async function finalizeProposal(client, governanceAddress, proposalId) {
  */
 export async function reclaimLiquidity(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "reclaimLiquidity", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "reclaimLiquidity", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -250,7 +250,7 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
 
   const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
 
-  const hash = await walletClient.writeContract({
+  const hash = await writeWithGasBuffer(walletClient, {
     ...factory,
     functionName: "createDAO",
     args: [name, symbol, parseEther(String(initialSupplyWhole)), parseEther(String(maxSupplyWhole)), DEFAULT_CONFIG],
@@ -306,7 +306,7 @@ export async function splitTokens(client, vaultAddress, amountWhole) {
   const underlyingAddress = await publicClient.readContract({ ...vault, functionName: "underlying" });
   const amount = parseEther(String(amountWhole));
 
-  const approveHash = await client.writeContract({
+  const approveHash = await writeWithGasBuffer(client, {
     address: underlyingAddress,
     abi: ERC20_APPROVE_ABI,
     functionName: "approve",
@@ -314,7 +314,7 @@ export async function splitTokens(client, vaultAddress, amountWhole) {
   });
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
 
-  const hash = await client.writeContract({ ...vault, functionName: "splitTokens", args: [amount] });
+  const hash = await writeWithGasBuffer(client, { ...vault, functionName: "splitTokens", args: [amount] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { approveHash, hash };
 }
@@ -327,7 +327,7 @@ export async function splitTokens(client, vaultAddress, amountWhole) {
  */
 export async function mergeTokens(client, vaultAddress, amountWhole) {
   const vault = vaultContract(vaultAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...vault,
     functionName: "mergeTokens",
     args: [parseEther(String(amountWhole))],
@@ -346,7 +346,7 @@ export async function mergeTokens(client, vaultAddress, amountWhole) {
  */
 export async function redeemTokens(client, vaultAddress) {
   const vault = vaultContract(vaultAddress);
-  const hash = await client.writeContract({ ...vault, functionName: "redeemTokens", args: [] });
+  const hash = await writeWithGasBuffer(client, { ...vault, functionName: "redeemTokens", args: [] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -368,7 +368,7 @@ export async function unwrapWmon(client, governanceAddress, amountWhole) {
   const wmon = { address: getAddress(wmonAddress), abi: WMON_ABI };
   const amount = parseEther(String(amountWhole));
 
-  const hash = await client.writeContract({ ...wmon, functionName: "withdraw", args: [amount] });
+  const hash = await writeWithGasBuffer(client, { ...wmon, functionName: "withdraw", args: [amount] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }

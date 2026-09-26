@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
 import { getAddress, parseEther, zeroHash } from "viem";
-import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES } from "../config.js";
+import { publicClient, walletClient, operatorAccount, FACTORY_ADDRESSES, writeWithGasBuffer } from "../config.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -100,7 +100,7 @@ export async function cancel() {
 export async function execute(client, governanceAddress, proposalId, valueWhole = 0) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "executeProposal",
     args: [BigInt(proposalId)],
@@ -173,7 +173,7 @@ export async function proposeWithCriteria(
 ) {
   const gov = contractFor(governanceAddress);
 
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "propose",
     args: [
@@ -200,7 +200,7 @@ export async function proposeWithCriteria(
 /** `support`: VoteType - 0 = Against, 1 = For, 2 = Abstain. */
 export async function castApprovalVote(client, governanceAddress, proposalId, support) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "castApprovalVote",
     args: [BigInt(proposalId), support],
@@ -212,7 +212,7 @@ export async function castApprovalVote(client, governanceAddress, proposalId, su
 /** Finalizes the approval vote once its window has closed. */
 export async function finalizeApproval(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "finalizeApproval", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "finalizeApproval", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -228,7 +228,7 @@ export async function finalizeApproval(client, governanceAddress, proposalId) {
  */
 export async function takePosition(client, governanceAddress, proposalId, side, amountWhole) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "takePosition",
     args: [BigInt(proposalId), side, parseEther(String(amountWhole))],
@@ -244,7 +244,7 @@ export async function takePosition(client, governanceAddress, proposalId, side, 
 /** Reads the configured oracle directly and finalizes in one call - oracle-track proposals only. */
 export async function resolveViaOracle(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "resolveViaOracle", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "resolveViaOracle", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -257,7 +257,7 @@ export async function resolveViaOracle(client, governanceAddress, proposalId) {
 /** Proposes what actually happened - human-track only. `outcome`: 1 = Success, 2 = Failure (0 = Unresolved is invalid here). */
 export async function proposeResolution(client, governanceAddress, proposalId, outcome) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "proposeResolution",
     args: [BigInt(proposalId), outcome],
@@ -269,7 +269,7 @@ export async function proposeResolution(client, governanceAddress, proposalId, o
 /** Disputes a proposed resolution within its window, posting a challenge bond. Opens the adjudication vote. */
 export async function challengeResolution(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "challengeResolution", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "challengeResolution", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -277,7 +277,7 @@ export async function challengeResolution(client, governanceAddress, proposalId)
 /** Finalizes an UNCHALLENGED human-track resolution once its challenge window has passed. */
 export async function finalizeUnchallenged(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "finalizeUnchallenged", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "finalizeUnchallenged", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -290,7 +290,7 @@ export async function finalizeUnchallenged(client, governanceAddress, proposalId
  */
 export async function castAdjudicationVote(client, governanceAddress, proposalId, outcome) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({
+  const hash = await writeWithGasBuffer(client, {
     ...gov,
     functionName: "castAdjudicationVote",
     args: [BigInt(proposalId), outcome],
@@ -302,7 +302,7 @@ export async function castAdjudicationVote(client, governanceAddress, proposalId
 /** Finalizes adjudication once its voting window closes - determines the true outcome and settles bonds. */
 export async function finalizeAdjudication(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "finalizeAdjudication", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "finalizeAdjudication", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -314,7 +314,7 @@ export async function finalizeAdjudication(client, governanceAddress, proposalId
 /** Claims a position's payout once the proposal is Finalized - winning side splits the entire pool proportionally. */
 export async function claimPosition(client, governanceAddress, proposalId) {
   const gov = contractFor(governanceAddress);
-  const hash = await client.writeContract({ ...gov, functionName: "claimPosition", args: [BigInt(proposalId)] });
+  const hash = await writeWithGasBuffer(client, { ...gov, functionName: "claimPosition", args: [BigInt(proposalId)] });
   await publicClient.waitForTransactionReceipt({ hash });
   return { hash };
 }
@@ -349,7 +349,7 @@ export async function createDAO(name, symbol, initialSupplyWhole, maxSupplyWhole
 
   const factory = { address: getAddress(factoryAddress), abi: factoryAbi };
 
-  const hash = await walletClient.writeContract({
+  const hash = await writeWithGasBuffer(walletClient, {
     ...factory,
     functionName: "createDAO",
     args: [name, symbol, parseEther(String(initialSupplyWhole)), parseEther(String(maxSupplyWhole)), DEFAULT_CONFIG],
