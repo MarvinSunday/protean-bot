@@ -343,6 +343,16 @@ export async function stakeTokens(account, stakingTokenAddress, amountWhole) {
   });
   await publicClient.waitForTransactionReceipt({ hash: approveHash });
 
+  // Two separate transactions here, only one gas check before both -
+  // if approve's own gas cost isn't yet reflected in the wallet's
+  // balance by the time this second transaction's own gas estimation
+  // runs (the same mined-vs-visible race already fixed once in
+  // ensureGasFunded itself), the stake call can genuinely fail on gas
+  // even though approve just succeeded. Re-checking here is cheap in
+  // the common case - ensureGasFunded returns immediately once the
+  // balance is already sufficient - and closes this exact gap.
+  await ensureGasFunded(account);
+
   const stakeHash = await writeWithGasBuffer(client, {
     address: getAddress(stakingTokenAddress),
     abi: abis.StakedGovernanceToken,

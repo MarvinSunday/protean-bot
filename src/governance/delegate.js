@@ -251,7 +251,7 @@ export async function getCouncil(governanceAddress) {
 // script: a separately-entered number could drift out of sync with the
 // actual list, so there's nothing to keep in sync by construction.
 const DEFAULT_CONFIG_WITHOUT_COUNCIL_SIZE = {
-  termLength: 60n * 60n * 24n * 30n,
+  termLength: 60n * 60n,
   candidacyThreshold: 0n,
   candidacyPeriod: 50_400,
   electionVotingPeriod: 50_400,
